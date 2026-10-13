@@ -1,0 +1,28 @@
+services:
+  api:
+    build: ./backend
+    ports:
+      - "8080:8080"
+    environment:
+      APP_MODE: http
+      DYNAMODB_ENDPOINT: http://dynamodb:8000
+      USERS_TABLE: users
+      EXPENSES_TABLE: expenses
+      JWT_SECRET: local-dev-secret
+    depends_on:
+      - dynamodb
+    
+  dynamodb:
+    image: amazon/dynamodb-local
+    ports:
+      - "8000:8000"
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
+  
+  localstack:
+    image: localstack/localstack
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: s3
+    profiles:
+      - aws

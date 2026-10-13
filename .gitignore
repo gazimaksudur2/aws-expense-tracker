@@ -1,0 +1,1 @@
+*.exe, .terraform/, *.tfstate*, *.tfvars, debug-*.log, *.zip
