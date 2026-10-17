@@ -123,10 +123,10 @@ func TestProtectedRoutes_RejectMissingAndInvalidTokens(t *testing.T) {
 	wrongSecret, _ := auth.SignToken("user_x", "some-other-secret")
 
 	tokens := map[string]string{
-		"missing token":    "",
-		"garbage token":    "garbage.token.here",
-		"expired token":    expiredToken,
-		"wrong signature":  wrongSecret,
+		"missing token":   "",
+		"garbage token":   "garbage.token.here",
+		"expired token":   expiredToken,
+		"wrong signature": wrongSecret,
 	}
 	routes := []struct{ method, path string }{
 		{"POST", "/expenses"},
@@ -148,11 +148,11 @@ func TestCreateExpense_Validation(t *testing.T) {
 	tok := registerAndLogin(t, h, "a@test.com")
 
 	cases := map[string]string{
-		"negative amount":   `{"amount":"-5","category":"food","date":"2026-10-10"}`,
-		"non-numeric":       `{"amount":"abc","category":"food","date":"2026-10-10"}`,
-		"missing category":  `{"amount":"5","category":"  ","date":"2026-10-10"}`,
-		"bad date":          `{"amount":"5","category":"food","date":"10/10/2026"}`,
-		"not json":          `nope`,
+		"negative amount":  `{"amount":"-5","category":"food","date":"2026-10-10"}`,
+		"non-numeric":      `{"amount":"abc","category":"food","date":"2026-10-10"}`,
+		"missing category": `{"amount":"5","category":"  ","date":"2026-10-10"}`,
+		"bad date":         `{"amount":"5","category":"food","date":"10/10/2026"}`,
+		"not json":         `nope`,
 	}
 	for name, body := range cases {
 		if code, _ := do(t, h, "POST", "/expenses", tok, body); code != http.StatusBadRequest {
