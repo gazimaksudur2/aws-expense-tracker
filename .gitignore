@@ -1,1 +1,13 @@
-*.exe, .terraform/, *.tfstate*, *.tfvars, debug-*.log, *.zip
+*.exe
+.terraform/
+*.tfstate*
+*.tfvars
+debug-*.log
+*.zip
+*.log
+*.txt
+*.csv
+*.json
+*.xml
+*.html
+*.css
