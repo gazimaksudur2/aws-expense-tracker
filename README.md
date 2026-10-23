@@ -4,7 +4,7 @@ A small HTTP API for recording spending and reading a month back as a list and a
 
 You register, log an expense, and ask for a month's rows and totals by category. Every expense belongs to the signed-in user, and one user cannot read another user's rows.
 
-The same handlers are meant to run in two places: as an HTTP server in Docker on a laptop, and as a Lambda function behind API Gateway in AWS. **The local half is built and working. The AWS half is designed but not built yet.** See [Status](#status).
+The same handlers run two ways: as an HTTP server in Docker locally, and as a Lambda behind API Gateway in AWS. **Local development is complete. Lambda binaries are built. Terraform modules for database, storage, and monitoring are written; the API module and `dev` apply are next.**
 
 ## Status
 
@@ -13,16 +13,29 @@ The same handlers are meant to run in two places: as an HTTP server in Docker on
 | 1 | Go handlers, JWT auth, in-memory stores, unit and handler tests | Done |
 | 2 | Docker Compose with DynamoDB Local | Done |
 | 3 | DynamoDB store, table creation on startup, integration tests | Done |
-| 4 | Lambda entrypoint (`APP_MODE=lambda`) | Next |
-| 5 | Lambda authorizer (`cmd/authorizer`) | Planned |
-| 6-9 | API Gateway, S3 receipts, IAM roles, CloudWatch | Planned |
-| 10-11 | Terraform modules and environments, GitHub Actions with OIDC | Planned |
-| 12 | Replace the custom JWT with Amazon Cognito | Planned |
+| 4 | Business Lambda entrypoint (`APP_MODE=lambda` via `algnhsa`) | Done |
+| 5 | Authorizer Lambda (`cmd/authorizer`) | Done |
+| 6 | Terraform: `modules/database`, `storage`, `monitoring` | In progress |
+| 6–9 | Terraform `modules/api` (API Gateway, Lambdas, IAM), S3 receipts wiring, apply `dev` | Next |
+| 10–11 | Environments (`dev`/`staging`/`prod`), GitHub Actions with OIDC | Planned |
+| 12 | Replace custom JWT with Amazon Cognito | Planned |
 | 13 | Architecture diagram | Planned |
 
-Receipt upload (`POST /receipts/upload`) is a stub that returns `501 Not Implemented` until Step 7.
+Receipt upload (`POST /receipts/upload`) still returns `501 Not Implemented` until the S3 presigned-URL handler is wired.
 
-## Quick start
+### AWS account prep (done)
+
+One-time setup already completed for this project:
+
+| Item | Value |
+|---|---|
+| Region | `us-east-1` |
+| Terraform state bucket | `expense-tracker-tfstate-<account-id>` (versioned, public access blocked) |
+| JWT secret | SSM SecureString `/expense-tracker/dev/jwt-secret` |
+
+Local auth uses `aws login` / AWS CLI credentials. Prefer an IAM user over root for day-to-day work.
+
+## Quick start (local)
 
 Requires Go 1.26+ and Docker Desktop.
 
@@ -51,7 +64,7 @@ curl "localhost:8080/expenses/monthly?month=2026-10" -H "Authorization: Bearer <
 curl "localhost:8080/analytics?month=2026-10"        -H "Authorization: Bearer <token>"
 ```
 
-Data is stored in DynamoDB Local, so it survives `docker compose restart api`. DynamoDB Local runs with `-inMemory`, so it is wiped when that container stops (`docker compose down`).
+Data lives in DynamoDB Local, so it survives `docker compose restart api`. DynamoDB Local uses `-inMemory`, so `docker compose down` clears it.
 
 ## API
 
@@ -84,9 +97,9 @@ POST /users/login
 { "token": "eyJhbGciOi..." }
 ```
 
-- Emails are lowercased, so `A@Test.com` and `a@test.com` are the same account (`409` on a duplicate).
-- Passwords must be 8 to 72 characters (bcrypt's limit).
-- A wrong password and an unknown email return the same `401`, so the API does not reveal which emails exist.
+- Emails are lowercased (`409` on a duplicate).
+- Passwords must be 8–72 characters (bcrypt limit).
+- Wrong password and unknown email return the same `401`.
 - Tokens are HS256 JWTs that expire after 24 hours.
 
 ### Record an expense
@@ -104,7 +117,7 @@ Authorization: Bearer <token>
 - `amount` is a positive decimal string, stored with two decimals.
 - `category` is trimmed and lowercased.
 - `date` is `YYYY-MM-DD`.
-- The owner always comes from the token. A `user_id` in the body is ignored.
+- Owner always comes from the token; a `user_id` in the body is ignored.
 
 ### Read a month
 
@@ -135,88 +148,127 @@ An empty month returns `[]` and `"0.00"`. A missing or malformed `month` returns
 
 ## How it is built
 
-### One handler set, swappable storage
+### One handler set, two runtimes
 
-`cmd/api` serves HTTP on `:8080`. Handlers depend on two interfaces, not on a database:
+`cmd/api` serves HTTP on `:8080` when `APP_MODE=http` (or unset). When `APP_MODE=lambda`, it uses `algnhsa` to adapt API Gateway HTTP API (payload v2) events onto the same `http.Handler`.
 
-- `auth.UserStore` (`CreateUser`, `GetUserByEmail`)
-- `expense.Store` (`Put`, `QueryMonth`)
+`cmd/authorizer` is a separate Lambda. It calls the same `auth.Authorize()` used by local HTTP middleware, and returns a simple authorizer response with `user_id` in the context.
 
-Each interface has an in-memory implementation (used by the unit and handler tests) and a DynamoDB implementation (`internal/store.DynamoStore`). `main.go` picks one from the environment:
+### Swappable storage
+
+Handlers depend on interfaces, not a database:
+
+- `auth.UserStore` — `CreateUser`, `GetUserByEmail`
+- `expense.Store` — `Put`, `QueryMonth`
 
 | Environment | Storage |
 |---|---|
-| `USERS_TABLE` or `EXPENSES_TABLE` unset | In-memory (plain `go run`) |
-| Table names and `DYNAMODB_ENDPOINT` set | DynamoDB Local, tables created on startup |
-| Table names set, no endpoint | Real DynamoDB. Tables must already exist (Terraform, later). |
-
-### The auth check is one function
-
-`auth.Authorize(token, secret)` verifies the signature and expiry and returns the `user_id`. Locally an HTTP middleware calls it. In AWS the Lambda authorizer (Step 5) will call the same function. Handlers read the user from the request context and never parse a token.
+| Table names unset | In-memory (plain `go run` / unit tests) |
+| Table names + `DYNAMODB_ENDPOINT` | DynamoDB Local; tables created on startup |
+| Table names, no endpoint | Real DynamoDB (Lambda); Terraform owns the tables |
 
 ### DynamoDB access patterns
 
-Two tables. Each query the API offers is a key lookup, and nothing scans.
+**users.** Partition key `email`. Attributes: `user_id`, `name`, `password_hash`, `created_at`. Registration uses `attribute_not_exists(email)`.
 
-**users.** Partition key `email`, so login is a `GetItem`. Attributes: `user_id`, `name`, `password_hash` (bcrypt), `created_at`. Registration uses a conditional put (`attribute_not_exists(email)`), so two simultaneous sign-ups for one email cannot both succeed.
+**expenses.** Partition key `user_id`. Sort key `sk` = `date#expense_id` (example: `2026-10-10#327c5b6e`). A month is one `Query` with `begins_with(sk, "YYYY-MM")`. No scans. Analytics sums that query in the function.
 
-**expenses.** Partition key `user_id`. Sort key `sk` holding `date#expense_id`, for example `2026-10-10#327c5b6e`.
-
-A monthly report is one `Query`: partition key equals the caller's `user_id`, and `sk` begins with `2026-10`. Results come back already ordered by date, and a paginator handles results larger than one 1 MB page. User isolation falls out of the key, because the store never accepts a `user_id` from the request.
-
-Analytics runs that same query and sums `amount` by `category` in the function. A month of personal expenses is a small result.
-
-## Development
+## Repository layout
 
 ```text
 backend/
-  cmd/api/              HTTP server, handlers, handler tests
-  cmd/authorizer/       placeholder until Step 5
-  internal/auth/        passwords, JWT sign and verify, user store
-  internal/expense/     expense model, store interface, in-memory store
-  internal/analytics/   category totals
-  internal/store/       DynamoDB implementation and integration tests
-  internal/id/          random ID helper
-  *_test.go             auth, expense and analytics unit tests
+  cmd/api/                 HTTP + Lambda business entrypoint, handlers, tests
+  cmd/authorizer/          Phase 1 JWT authorizer Lambda
+  internal/auth/           passwords, JWT, user store
+  internal/expense/        expense model + store interface
+  internal/analytics/      category totals
+  internal/store/          DynamoDB implementation + integration tests
+  internal/id/             random IDs
+  Dockerfile
 docker-compose.yml
+infrastructure/terraform/
+  modules/
+    database/              DynamoDB users + expenses tables
+    storage/               S3 receipts bucket (SSE-S3, versioning, lifecycle)
+    monitoring/            CloudWatch log groups, dashboard, error alarm
+    api/                   (next) HTTP API, Lambdas, IAM, authorizer
+  environments/
+    dev/                   (next) root module to apply
+    staging/               defined later, not applied yet
+    prod/
 ```
+
+## Development
 
 ### Tests
 
 ```bash
 cd backend
-go test ./...                                      # no Docker needed
+go test ./...                                      # no Docker
+go test -race ./...
 ```
 
 ```bash
-docker compose up -d dynamodb                      # DynamoDB Local on :8000
+docker compose up -d dynamodb
 go test -tags=integration ./internal/store -v
 ```
 
-Plain `go test ./...` uses the in-memory stores, including the HTTP handler tests, so it needs no Docker. The integration tests carry the `integration` build tag and create uniquely named tables in DynamoDB Local on each run.
-
 | File | What it locks in |
 |---|---|
-| `auth_test.go` | Password hashing, token signing, wrong secret, missing token, expired token |
+| `auth_test.go` | Password hashing, token signing, wrong/missing/expired token |
 | `expense_test.go` | Monthly query and user isolation |
-| `analytics_test.go` | Category totals and empty input |
-| `cmd/api/handlers_test.go` | Every route through the real router: validation, `401` cases, user isolation, response shapes |
-| `internal/store/dynamo_integration_test.go` | Conditional create, month query, ordering, isolation against DynamoDB Local |
+| `analytics_test.go` | Category totals |
+| `cmd/api/handlers_test.go` | Every route through the real router |
+| `internal/store/dynamo_integration_test.go` | DynamoDB Local create, query, isolation |
 
-### Configuration
+### Build Lambda zips (Windows PowerShell)
+
+Lambda `provided.al2023` requires the binary inside the zip to be named `bootstrap`:
+
+```powershell
+cd backend
+$env:GOOS = "linux"; $env:GOARCH = "amd64"
+
+go build -o $env:TEMP\bootstrap .\cmd\api
+Compress-Archive -Force -Path $env:TEMP\bootstrap -DestinationPath $env:TEMP\api.zip
+
+go build -o $env:TEMP\bootstrap .\cmd\authorizer
+Compress-Archive -Force -Path $env:TEMP\bootstrap -DestinationPath $env:TEMP\authorizer.zip
+
+Remove-Item Env:GOOS; Remove-Item Env:GOARCH
+```
+
+### Local configuration
 
 | Variable | Local value | Notes |
 |---|---|---|
-| `JWT_SECRET` | `local-dev-secret` | Required. The API refuses to start without it. |
-| `APP_MODE` | `http` | `lambda` arrives in Step 4. |
+| `JWT_SECRET` | `local-dev-secret` | Required |
+| `APP_MODE` | `http` | Use `lambda` for the Lambda runtime |
 | `USERS_TABLE` | `users` | |
 | `EXPENSES_TABLE` | `expenses` | |
-| `DYNAMODB_ENDPOINT` | `http://dynamodb:8000` | Leave unset in AWS. |
-| `AWS_REGION` | `us-east-1` | Optional. Local runs default to it. |
+| `DYNAMODB_ENDPOINT` | `http://dynamodb:8000` | Leave unset in AWS |
+| `AWS_REGION` | `us-east-1` | Optional locally |
 
-## Target AWS design (not built yet)
+## Infrastructure (in progress)
 
-The local build is the first half of this design. Nothing below exists in an AWS account yet.
+Terraform modules are under `infrastructure/terraform/modules/`. Only **`dev`** will be applied. Staging and prod will call the same modules with a different `environment` name and state key.
+
+### Modules written
+
+| Module | Creates |
+|---|---|
+| `database` | `users-{env}`, `expenses-{env}` (on-demand) |
+| `storage` | Private receipts bucket, SSE-S3, versioning, 30-day noncurrent expiry |
+| `monitoring` | 14-day log groups for both Lambdas, one dashboard, one error alarm |
+
+### Still to write
+
+- `modules/api` — two IAM roles (least privilege), business + authorizer Lambdas, API Gateway HTTP API, routes, REQUEST authorizer
+- `environments/dev` — backend config pointing at the state bucket, module wiring, outputs (API URL)
+- Wire receipt upload to return a presigned PUT
+- GitHub Actions + OIDC deploy of `dev`
+
+### Target request path (AWS)
 
 ```mermaid
 flowchart TD
@@ -225,7 +277,7 @@ flowchart TD
   authorizer[Lambda authorizer]
   api[Business Lambda]
   db[(DynamoDB)]
-  bucket[(S3)]
+  fc[(S3)]
   logs[CloudWatch]
 
   client -->|HTTPS and bearer token| gateway
@@ -239,25 +291,15 @@ flowchart TD
   authorizer --> logs
 ```
 
-1. The client calls API Gateway over HTTPS with a bearer token.
-2. The authorizer checks the token and returns the caller's `user_id`. A bad or expired token stops here, and the business function is never invoked.
-3. The business function reads `user_id` from the authorizer context and reads or writes DynamoDB.
-4. For a receipt, it returns a presigned `PUT` URL and the client uploads straight to S3.
-5. CloudWatch keeps logs, latency and an alarm on errors.
+### Planned security split
 
-Register and login skip step 2.
+| Role | Allowed |
+|---|---|
+| Business Lambda | DynamoDB Get/Put/Query on the two tables; S3 Get/Put on `receipts/*`; own logs |
+| Authorizer Lambda | SSM `GetParameter` on the JWT secret; own logs |
 
-### Planned pieces
+The business function cannot read the signing secret. Both Lambdas stay **outside a VPC** (no NAT / interface endpoints) so they use AWS public endpoints for DynamoDB, S3, and SSM.
 
-- **Two entrypoints, one codebase.** `cmd/api` runs as HTTP locally and as Lambda with `APP_MODE=lambda`. `cmd/authorizer` is a separate, smaller Lambda that only verifies tokens.
-- **Lambda authorizer.** API Gateway's built-in JWT authorizer needs an issuer with a JWKS URL, and a homemade HMAC secret has none. A Lambda authorizer can check that token. The signing secret will live in SSM Parameter Store.
-- **Receipts.** A presigned `PUT` that expires in five minutes, with keys `receipts/{user_id}/{expense_id}/{filename}`. The bucket will block public access, use SSE-S3, enable versioning, and expire noncurrent versions after 30 days.
-- **Two IAM roles, least privilege.** The business role gets `GetItem`, `PutItem` and `Query` on the two tables, `PutObject` and `GetObject` on `receipts/*`, and its own log group. The authorizer role gets `GetParameter` on the secret and its own log group. The function that stores an expense cannot read the signing secret.
-- **CloudWatch.** 14-day log retention, one dashboard (requests, errors, p50, p99) and one error alarm.
-- **Terraform.** Modules `api`, `database`, `storage`, `monitoring`, called from `environments/dev`, `staging` and `prod`. Only `dev` will be applied. State keys are separate per environment.
-- **GitHub Actions.** Pull requests run the unit and integration tests. Pushes to `main` build the Linux zips and apply `dev`, authenticating with OIDC and no stored access keys.
-- **Free-tier discipline.** Both Lambdas run outside a VPC. There is no NAT gateway, RDS, ECS, load balancer or VPC endpoint.
+### Phase 2: Cognito (later)
 
-### Phase 2: Cognito
-
-Once phase 1 is deployed, Amazon Cognito replaces the custom login. API Gateway's JWT authorizer validates Cognito tokens (issuer `https://cognito-idp.{region}.amazonaws.com/{userPoolId}`, audience the app client id). The register and login routes, `password_hash`, the authorizer Lambda and the SSM secret are removed. The users table then keys on the Cognito `sub`. The handlers already read `user_id` from request context, so the expense code does not change.
+After phase 1 is deployed, Cognito replaces custom login. API Gateway's JWT authorizer validates Cognito tokens. Register/login routes, `password_hash`, the authorizer Lambda, and the SSM secret go away. Expense handlers already read `user_id` from authorizer context, so they stay put.

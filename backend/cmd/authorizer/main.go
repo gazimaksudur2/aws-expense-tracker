@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
@@ -12,10 +13,13 @@ import (
 
 func handler(ctx context.Context, req events.APIGatewayV2CustomAuthorizerV2Request) (events.APIGatewayV2CustomAuthorizerSimpleResponse, error) {
 	secret := os.Getenv("JWT_SECRET")
-	if len(req.IdentitySource) == 0 {
+	if secret == "" || len(req.IdentitySource) == 0 {
 		return events.APIGatewayV2CustomAuthorizerSimpleResponse{IsAuthorized: false}, nil
 	}
-	token := req.IdentitySource[0]
+	token := strings.TrimSpace(strings.TrimPrefix(req.IdentitySource[0], "Bearer "))
+	if token == "" {
+		return events.APIGatewayV2CustomAuthorizerSimpleResponse{IsAuthorized: false}, nil
+	}
 
 	userID, err := auth.Authorize(token, secret)
 	if err != nil {
