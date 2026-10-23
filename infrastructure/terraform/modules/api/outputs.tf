@@ -1,0 +1,19 @@
+output "api_endpoint" {
+  value = aws_apigatewayv2_api.http.api_endpoint
+}
+
+output "api_function_name" {
+  value = aws_lambda_function.api.function_name
+}
+
+output "authorizer_function_name" {
+  value = aws_lambda_function.authorizer.function_name
+}
+
+output "api_function_arn" {
+  value = aws_lambda_function.api.arn
+}
+
+output "authorizer_function_arn" {
+  value = aws_lambda_function.authorizer.arn
+}
