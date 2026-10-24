@@ -1,229 +1,187 @@
 # Expense Tracker API
 
-A small HTTP API for recording spending and reading a month back as a list and a category breakdown. Written in Go.
+A Go expense API. Locally it runs in Docker against DynamoDB Local. In AWS it is meant to run as two Lambdas behind an API Gateway HTTP API, with DynamoDB, S3, and CloudWatch provisioned by Terraform.
 
-You register, log an expense, and ask for a month's rows and totals by category. Every expense belongs to the signed-in user, and one user cannot read another user's rows.
+You register, log an expense, and read a month as rows and category totals. Every expense belongs to the signed-in user.
 
-The same handlers run two ways: as an HTTP server in Docker locally, and as a Lambda behind API Gateway in AWS. **Local development is complete. Lambda binaries are built. Terraform modules for database, storage, and monitoring are written; the API module and `dev` apply are next.**
+**Local path is complete and verified.** Terraform for `dev` is written and initialized; the first `apply` is the next milestone.
 
 ## Status
 
 | Step | What | State |
 |---|---|---|
 | 1 | Go handlers, JWT auth, in-memory stores, unit and handler tests | Done |
-| 2 | Docker Compose with DynamoDB Local | Done |
-| 3 | DynamoDB store, table creation on startup, integration tests | Done |
+| 2 | Docker Compose + DynamoDB Local | Done |
+| 3 | DynamoDB store, startup table creation, integration tests | Done |
 | 4 | Business Lambda entrypoint (`APP_MODE=lambda` via `algnhsa`) | Done |
 | 5 | Authorizer Lambda (`cmd/authorizer`) | Done |
-| 6 | Terraform: `modules/database`, `storage`, `monitoring` | In progress |
-| 6–9 | Terraform `modules/api` (API Gateway, Lambdas, IAM), S3 receipts wiring, apply `dev` | Next |
-| 10–11 | Environments (`dev`/`staging`/`prod`), GitHub Actions with OIDC | Planned |
-| 12 | Replace custom JWT with Amazon Cognito | Planned |
-| 13 | Architecture diagram | Planned |
+| 6–9 | Terraform modules (`database`, `storage`, `monitoring`, `api`) + `environments/dev` | Written — not applied yet |
+| 10–11 | Staging/prod apply, GitHub Actions + OIDC | Planned |
+| 12 | Cognito JWT authorizer (phase 2) | Planned |
+| 13 | Architecture diagram asset | Planned |
 
-Receipt upload (`POST /receipts/upload`) still returns `501 Not Implemented` until the S3 presigned-URL handler is wired.
+`POST /receipts/upload` still returns `501` until the S3 presigned PUT handler is wired.
 
-### AWS account prep (done)
+## Prerequisites
 
-One-time setup already completed for this project:
-
-| Item | Value |
+| Tool | Notes |
 |---|---|
-| Region | `us-east-1` |
-| Terraform state bucket | `expense-tracker-tfstate-<account-id>` (versioned, public access blocked) |
-| JWT secret | SSM SecureString `/expense-tracker/dev/jwt-secret` |
+| Go 1.26+ | Backend language |
+| Docker Desktop | Local API + DynamoDB Local |
+| AWS CLI v2 | `aws login` or IAM access keys |
+| Terraform ≥ 1.5 | Infrastructure |
 
-Local auth uses `aws login` / AWS CLI credentials. Prefer an IAM user over root for day-to-day work.
+## Project initialization
 
-## Quick start (local)
+### 1. Clone and enter the repo
 
-Requires Go 1.26+ and Docker Desktop.
+```powershell
+cd D:\DevProjects\PersonalProjects\aws-expense-tracker
+```
 
-```bash
+### 2. Install Go dependencies
+
+```powershell
+cd backend
+go mod tidy
+go test ./...
+```
+
+### 3. Run locally with Docker (primary path)
+
+From the **repo root**:
+
+```powershell
+cd D:\DevProjects\PersonalProjects\aws-expense-tracker
 docker compose up --build
 ```
 
-This starts the API on `localhost:8080` and DynamoDB Local on `localhost:8000`. On startup the API creates the `users` and `expenses` tables, retrying for up to 30 seconds while DynamoDB Local boots.
+This starts:
 
-```bash
-# create an account
-curl -X POST localhost:8080/users/register -H "Content-Type: application/json" \
-  -d '{"email":"me@test.com","name":"Me","password":"password123"}'
+| Service | Port |
+|---|---|
+| API (`APP_MODE=http`) | `8080` |
+| DynamoDB Local | `8000` |
 
-# log in and keep the token
-curl -X POST localhost:8080/users/login -H "Content-Type: application/json" \
-  -d '{"email":"me@test.com","password":"password123"}'
+On startup the API creates the `users` and `expenses` tables when `DYNAMODB_ENDPOINT` is set.
 
-# record an expense
-curl -X POST localhost:8080/expenses \
-  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
-  -d '{"amount":"42.50","category":"groceries","date":"2026-10-10"}'
+Optional LocalStack (S3 only, for later receipt work):
 
-# read the month back
-curl "localhost:8080/expenses/monthly?month=2026-10" -H "Authorization: Bearer <token>"
-curl "localhost:8080/analytics?month=2026-10"        -H "Authorization: Bearer <token>"
+```powershell
+docker compose --profile aws up --build
 ```
 
-Data lives in DynamoDB Local, so it survives `docker compose restart api`. DynamoDB Local uses `-inMemory`, so `docker compose down` clears it.
+### 4. Smoke-test the local API
+
+```powershell
+curl.exe -X POST http://localhost:8080/users/register `
+  -H "Content-Type: application/json" `
+  -d "{\"email\":\"me@test.com\",\"name\":\"Me\",\"password\":\"password123\"}"
+
+curl.exe -X POST http://localhost:8080/users/login `
+  -H "Content-Type: application/json" `
+  -d "{\"email\":\"me@test.com\",\"password\":\"password123\"}"
+```
+
+Copy the `token`, then:
+
+```powershell
+curl.exe -X POST http://localhost:8080/expenses `
+  -H "Authorization: Bearer <token>" `
+  -H "Content-Type: application/json" `
+  -d "{\"amount\":\"42.50\",\"category\":\"groceries\",\"date\":\"2026-10-10\"}"
+
+curl.exe "http://localhost:8080/expenses/monthly?month=2026-10" -H "Authorization: Bearer <token>"
+curl.exe "http://localhost:8080/analytics?month=2026-10" -H "Authorization: Bearer <token>"
+```
+
+Data survives `docker compose restart api`. `docker compose down` wipes DynamoDB Local (`-inMemory`).
 
 ## API
 
-Register and login are public. Every other route needs `Authorization: Bearer <token>`. Errors are JSON: `{"error": "message"}`.
+Register and login are public. Every other route needs `Authorization: Bearer <token>`. Errors: `{"error":"message"}`.
 
 | Route | Auth | Purpose |
 |---|---|---|
 | `POST /users/register` | public | Create an account |
-| `POST /users/login` | public | Exchange email and password for a token |
+| `POST /users/login` | public | Get a JWT |
 | `POST /expenses` | token | Record an expense |
-| `GET /expenses/monthly?month=YYYY-MM` | token | Rows for one month, ordered by date |
-| `GET /analytics?month=YYYY-MM` | token | Total and per-category sums for one month |
-| `POST /receipts/upload` | token | Not implemented yet (`501`) |
+| `GET /expenses/monthly?month=YYYY-MM` | token | Month rows, ordered by date |
+| `GET /analytics?month=YYYY-MM` | token | Total + per-category sums |
+| `POST /receipts/upload` | token | Stub (`501`) |
 
-### Register and login
+### Behaviour notes
 
-```http
-POST /users/register
-{ "email": "me@test.com", "name": "Me", "password": "password123" }
-
-201 Created
-{ "user_id": "user_fd04a043" }
-```
-
-```http
-POST /users/login
-{ "email": "me@test.com", "password": "password123" }
-
-200 OK
-{ "token": "eyJhbGciOi..." }
-```
-
-- Emails are lowercased (`409` on a duplicate).
-- Passwords must be 8–72 characters (bcrypt limit).
+- Emails are lowercased; duplicate → `409`.
+- Passwords must be 8–72 characters.
 - Wrong password and unknown email return the same `401`.
-- Tokens are HS256 JWTs that expire after 24 hours.
-
-### Record an expense
-
-```http
-POST /expenses
-Authorization: Bearer <token>
-
-{ "amount": "42.5", "category": "Groceries", "date": "2026-10-10" }
-
-201 Created
-{ "expense_id": "327c5b6e", "amount": "42.50", "category": "groceries", "date": "2026-10-10" }
-```
-
-- `amount` is a positive decimal string, stored with two decimals.
-- `category` is trimmed and lowercased.
-- `date` is `YYYY-MM-DD`.
-- Owner always comes from the token; a `user_id` in the body is ignored.
-
-### Read a month
-
-```http
-GET /expenses/monthly?month=2026-10
-
-200 OK
-{
-  "month": "2026-10",
-  "expenses": [
-    { "expense_id": "327c5b6e", "amount": "42.50", "category": "groceries", "date": "2026-10-10" }
-  ]
-}
-```
-
-```http
-GET /analytics?month=2026-10
-
-200 OK
-{
-  "month": "2026-10",
-  "total": "42.50",
-  "by_category": [ { "category": "groceries", "total": "42.50" } ]
-}
-```
-
-An empty month returns `[]` and `"0.00"`. A missing or malformed `month` returns `400`.
+- Tokens are HS256 JWTs, 24-hour expiry.
+- `amount` is a positive decimal string (stored with two decimals).
+- `category` is trimmed and lowercased; `date` is `YYYY-MM-DD`.
+- Owner always comes from the token; body `user_id` is ignored.
+- Empty month → `[]` and `"0.00"`.
 
 ## How it is built
 
-### One handler set, two runtimes
+### Two entrypoints, one handler set
 
-`cmd/api` serves HTTP on `:8080` when `APP_MODE=http` (or unset). When `APP_MODE=lambda`, it uses `algnhsa` to adapt API Gateway HTTP API (payload v2) events onto the same `http.Handler`.
-
-`cmd/authorizer` is a separate Lambda. It calls the same `auth.Authorize()` used by local HTTP middleware, and returns a simple authorizer response with `user_id` in the context.
+- `cmd/api` — HTTP on `:8080` when `APP_MODE=http`; Lambda when `APP_MODE=lambda` (`algnhsa` adapts API Gateway HTTP API v2).
+- `cmd/authorizer` — verifies the JWT with the same `auth.Authorize()` used by local middleware; returns `user_id` in the authorizer context.
 
 ### Swappable storage
 
-Handlers depend on interfaces, not a database:
-
-- `auth.UserStore` — `CreateUser`, `GetUserByEmail`
-- `expense.Store` — `Put`, `QueryMonth`
-
-| Environment | Storage |
+| Env | Storage |
 |---|---|
-| Table names unset | In-memory (plain `go run` / unit tests) |
-| Table names + `DYNAMODB_ENDPOINT` | DynamoDB Local; tables created on startup |
-| Table names, no endpoint | Real DynamoDB (Lambda); Terraform owns the tables |
+| Table names unset | In-memory (tests / plain `go run`) |
+| Tables + `DYNAMODB_ENDPOINT` | DynamoDB Local; tables created on startup |
+| Tables, no endpoint | Real DynamoDB (Lambda); Terraform owns tables |
 
-### DynamoDB access patterns
-
-**users.** Partition key `email`. Attributes: `user_id`, `name`, `password_hash`, `created_at`. Registration uses `attribute_not_exists(email)`.
-
-**expenses.** Partition key `user_id`. Sort key `sk` = `date#expense_id` (example: `2026-10-10#327c5b6e`). A month is one `Query` with `begins_with(sk, "YYYY-MM")`. No scans. Analytics sums that query in the function.
+**users:** PK `email`.  
+**expenses:** PK `user_id`, SK `sk` = `date#expense_id`. Monthly report = one `Query` with `begins_with(sk, "YYYY-MM")`. No scans.
 
 ## Repository layout
 
 ```text
 backend/
-  cmd/api/                 HTTP + Lambda business entrypoint, handlers, tests
-  cmd/authorizer/          Phase 1 JWT authorizer Lambda
-  internal/auth/           passwords, JWT, user store
-  internal/expense/        expense model + store interface
-  internal/analytics/      category totals
-  internal/store/          DynamoDB implementation + integration tests
-  internal/id/             random IDs
+  cmd/api/                 HTTP + Lambda business entrypoint
+  cmd/authorizer/          Phase 1 JWT authorizer
+  internal/auth|expense|analytics|store|id/
   Dockerfile
 docker-compose.yml
 infrastructure/terraform/
   modules/
-    database/              DynamoDB users + expenses tables
-    storage/               S3 receipts bucket (SSE-S3, versioning, lifecycle)
-    monitoring/            CloudWatch log groups, dashboard, error alarm
-    api/                   (next) HTTP API, Lambdas, IAM, authorizer
+    database/              DynamoDB tables
+    storage/               S3 receipts bucket
+    monitoring/            Log groups, dashboard, alarm
+    api/                   IAM, Lambdas, HTTP API, authorizer, routes
   environments/
-    dev/                   (next) root module to apply
-    staging/               defined later, not applied yet
-    prod/
+    dev/                   Root module to apply (written)
+    staging/               Placeholder
+    prod/                  Placeholder
 ```
 
-## Development
+## Development commands
 
-### Tests
+### Unit / handler tests (no Docker)
 
-```bash
+```powershell
 cd backend
-go test ./...                                      # no Docker
+go test ./...
 go test -race ./...
 ```
 
-```bash
+### Integration tests (DynamoDB Local)
+
+```powershell
+# from repo root
 docker compose up -d dynamodb
+cd backend
 go test -tags=integration ./internal/store -v
 ```
 
-| File | What it locks in |
-|---|---|
-| `auth_test.go` | Password hashing, token signing, wrong/missing/expired token |
-| `expense_test.go` | Monthly query and user isolation |
-| `analytics_test.go` | Category totals |
-| `cmd/api/handlers_test.go` | Every route through the real router |
-| `internal/store/dynamo_integration_test.go` | DynamoDB Local create, query, isolation |
+### Build Lambda zips (Windows)
 
-### Build Lambda zips (Windows PowerShell)
-
-Lambda `provided.al2023` requires the binary inside the zip to be named `bootstrap`:
+Runtime `provided.al2023` requires the binary inside the zip to be named `bootstrap`:
 
 ```powershell
 cd backend
@@ -236,39 +194,111 @@ go build -o $env:TEMP\bootstrap .\cmd\authorizer
 Compress-Archive -Force -Path $env:TEMP\bootstrap -DestinationPath $env:TEMP\authorizer.zip
 
 Remove-Item Env:GOOS; Remove-Item Env:GOARCH
+Test-Path $env:TEMP\api.zip, $env:TEMP\authorizer.zip
 ```
 
-### Local configuration
+Point `infrastructure/terraform/environments/dev/terraform.tfvars` at those paths (file is gitignored).
 
-| Variable | Local value | Notes |
-|---|---|---|
-| `JWT_SECRET` | `local-dev-secret` | Required |
-| `APP_MODE` | `http` | Use `lambda` for the Lambda runtime |
-| `USERS_TABLE` | `users` | |
-| `EXPENSES_TABLE` | `expenses` | |
-| `DYNAMODB_ENDPOINT` | `http://dynamodb:8000` | Leave unset in AWS |
-| `AWS_REGION` | `us-east-1` | Optional locally |
+### Local env vars (Compose sets these)
 
-## Infrastructure (in progress)
+| Variable | Local value |
+|---|---|
+| `JWT_SECRET` | `local-dev-secret` |
+| `APP_MODE` | `http` |
+| `USERS_TABLE` | `users` |
+| `EXPENSES_TABLE` | `expenses` |
+| `DYNAMODB_ENDPOINT` | `http://dynamodb:8000` |
 
-Terraform modules are under `infrastructure/terraform/modules/`. Only **`dev`** will be applied. Staging and prod will call the same modules with a different `environment` name and state key.
+## Deploy to AWS (`dev`)
 
-### Modules written
+Terraform code for `dev` is ready. Nothing is applied until you run `terraform apply`.
+
+### One-time AWS account prep
+
+Region: **`us-east-1`**.
+
+```powershell
+aws login
+aws sts get-caller-identity
+
+$ACCOUNT = "<your-12-digit-account-id>"
+$BUCKET = "expense-tracker-tfstate-$ACCOUNT"
+
+aws s3api create-bucket --bucket $BUCKET --region us-east-1
+aws s3api put-bucket-versioning --bucket $BUCKET --versioning-configuration Status=Enabled
+aws s3api put-public-access-block --bucket $BUCKET `
+  --public-access-block-configuration `
+  BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+
+$SECRET = -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 48 | ForEach-Object {[char]$_})
+aws ssm put-parameter `
+  --name "/expense-tracker/dev/jwt-secret" `
+  --value $SECRET `
+  --type SecureString `
+  --overwrite `
+  --region us-east-1
+Remove-Variable SECRET
+```
+
+Update `environments/dev/backend.tf` if your state bucket name differs.
+
+### Important: `aws login` vs Terraform
+
+The AWS CLI understands `aws login` sessions. The Terraform AWS provider often does **not**. After login, export credentials into the shell before `plan` / `apply`.
+
+### Apply sequence (PowerShell)
+
+```powershell
+# 1) Auth
+aws login
+aws sts get-caller-identity
+
+# 2) Export session so Terraform can use it
+aws configure export-credentials --format env
+# Then set (use your exported values):
+# $env:AWS_ACCESS_KEY_ID = "..."
+# $env:AWS_SECRET_ACCESS_KEY = "..."
+# $env:AWS_SESSION_TOKEN = "..."
+$env:AWS_REGION = "us-east-1"
+$env:AWS_SDK_LOAD_CONFIG = "1"
+
+# 3) Rebuild zips (see above), confirm terraform.tfvars paths
+
+# 4) Plan / apply from the dev root module — not the repo root
+cd D:\DevProjects\PersonalProjects\aws-expense-tracker\infrastructure\terraform\environments\dev
+terraform init
+terraform plan
+terraform apply
+terraform output api_endpoint
+```
+
+Prefer an IAM user with access keys (`aws configure`) for day-to-day Terraform instead of root + `aws login`.
+
+### After a successful apply
+
+```powershell
+$API = terraform output -raw api_endpoint
+curl.exe -X POST "$API/users/register" -H "Content-Type: application/json" `
+  -d "{\"email\":\"me@test.com\",\"name\":\"Me\",\"password\":\"password123\"}"
+```
+
+Protected routes may need a small handler follow-up so `user_id` is read from API Gateway authorizer context (`authorizer.lambda.user_id`) as well as local middleware context.
+
+### Tear down when not demoing
+
+```powershell
+cd infrastructure\terraform\environments\dev
+terraform destroy
+```
+
+## Infrastructure design
 
 | Module | Creates |
 |---|---|
 | `database` | `users-{env}`, `expenses-{env}` (on-demand) |
 | `storage` | Private receipts bucket, SSE-S3, versioning, 30-day noncurrent expiry |
-| `monitoring` | 14-day log groups for both Lambdas, one dashboard, one error alarm |
-
-### Still to write
-
-- `modules/api` — two IAM roles (least privilege), business + authorizer Lambdas, API Gateway HTTP API, routes, REQUEST authorizer
-- `environments/dev` — backend config pointing at the state bucket, module wiring, outputs (API URL)
-- Wire receipt upload to return a presigned PUT
-- GitHub Actions + OIDC deploy of `dev`
-
-### Target request path (AWS)
+| `monitoring` | 14-day log groups, one dashboard, one error alarm |
+| `api` | Two IAM roles, two Lambdas, HTTP API, REQUEST authorizer, routes |
 
 ```mermaid
 flowchart TD
@@ -277,7 +307,7 @@ flowchart TD
   authorizer[Lambda authorizer]
   api[Business Lambda]
   db[(DynamoDB)]
-  fc[(S3)]
+  bucket[(S3)]
   logs[CloudWatch]
 
   client -->|HTTPS and bearer token| gateway
@@ -291,15 +321,21 @@ flowchart TD
   authorizer --> logs
 ```
 
-### Planned security split
-
 | Role | Allowed |
 |---|---|
-| Business Lambda | DynamoDB Get/Put/Query on the two tables; S3 Get/Put on `receipts/*`; own logs |
-| Authorizer Lambda | SSM `GetParameter` on the JWT secret; own logs |
+| Business Lambda | DynamoDB Get/Put/Query; S3 Get/Put on `receipts/*`; own logs. JWT secret injected at deploy (no `ssm:GetParameter` on the role). |
+| Authorizer Lambda | `ssm:GetParameter` on the JWT secret; own logs |
 
-The business function cannot read the signing secret. Both Lambdas stay **outside a VPC** (no NAT / interface endpoints) so they use AWS public endpoints for DynamoDB, S3, and SSM.
+Both Lambdas stay outside a VPC (no NAT / interface endpoints).
 
-### Phase 2: Cognito (later)
+### Phase 2 (later)
 
-After phase 1 is deployed, Cognito replaces custom login. API Gateway's JWT authorizer validates Cognito tokens. Register/login routes, `password_hash`, the authorizer Lambda, and the SSM secret go away. Expense handlers already read `user_id` from authorizer context, so they stay put.
+Cognito replaces custom login. API Gateway JWT authorizer validates Cognito tokens. Register/login routes, `password_hash`, the authorizer Lambda, and the SSM secret go away. Expense handlers already key off `user_id` from authorizer context.
+
+## Still to do
+
+1. Export credentials and run `terraform apply` for `dev`
+2. Curl the live API; fix authorizer-context `user_id` if protected routes fail
+3. Implement S3 presigned receipt upload
+4. GitHub Actions (tests + deploy `dev` via OIDC)
+5. Cognito (phase 2)

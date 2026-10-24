@@ -46,7 +46,7 @@ resource "aws_iam_role_policy" "api" {
                     "s3:PutObject",
                     "s3:GetObject",
                 ]
-                resource = "${var.receipts_bucket_arn}/receipts/*"
+                Resource = "${var.receipts_bucket_arn}/receipts/*"
             },
             {
                 Sid = "Logs"
