@@ -21,7 +21,7 @@ resource "aws_iam_role" "api" {
 
 resource "aws_iam_role_policy" "api" {
     name = "expense-tracker-api-${var.environment}"
-    role = aws_iam_role.api.inside
+    role = aws_iam_role.api.id
     
     policy = jsonencode({
         Version = "2012-10-17"
