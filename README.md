@@ -4,7 +4,7 @@ A Go expense API. Locally it runs in Docker against DynamoDB Local. In AWS it ru
 
 You register, log an expense, and read a month as rows and category totals. Every expense belongs to the signed-in user.
 
-**Local and AWS phase 1 (including S3 receipt upload) are complete.** Re-apply `dev` to demo, then `terraform destroy` when idle. CI runs tests on every PR; deploy to `dev` uses GitHub Actions OIDC (no long-lived AWS keys in GitHub).
+**Local Docker still uses HS256 register/login.** On AWS, Cognito + API Gateway JWT authorizer replace the custom authorizer Lambda. CI runs tests on every PR; deploy to `dev` uses GitHub Actions OIDC.
 
 ## Status
 
@@ -14,11 +14,12 @@ You register, log an expense, and read a month as rows and category totals. Ever
 | 2 | Docker Compose + DynamoDB Local | Done |
 | 3 | DynamoDB store, startup table creation, integration tests | Done |
 | 4 | Business Lambda entrypoint (`APP_MODE=lambda` via `algnhsa`) | Done |
-| 5 | Authorizer Lambda (`cmd/authorizer`) | Done |
+| 5 | Authorizer Lambda (`cmd/authorizer`) | Done (phase 1; unused after Cognito) |
 | 6–9 | Terraform `dev` + S3 receipts (presigned PUT) | Done |
-| 10–11 | GitHub Actions CI + OIDC deploy workflows | Done (enable OIDC role once — see below) |
-| 12 | Cognito JWT authorizer (phase 2) | Planned |
-| 13 | Staging/prod applies + architecture diagram | Planned |
+| 10–11 | GitHub Actions CI + OIDC deploy workflows | Done |
+| 12 | Cognito JWT authorizer (phase 2) | Done |
+| 13 | Staging root module (apply only when needed) | Done |
+| 14 | Prod root module + architecture diagram asset | Planned |
 
 ### What stays in AWS after `terraform destroy`
 
@@ -27,7 +28,8 @@ These were created once by hand and are **not** in the Terraform stack. Keep the
 | Resource | Example |
 |---|---|
 | Terraform state bucket | `expense-tracker-tfstate-<account-id>` |
-| JWT secret (SSM SecureString) | `/expense-tracker/dev/jwt-secret` |
+
+The old SSM JWT secret (`/expense-tracker/dev/jwt-secret`) is **no longer used** by the AWS stack after phase 2. You may delete it. Local Docker still uses `JWT_SECRET` from Compose.
 
 ---
 
@@ -142,36 +144,36 @@ cd ..
 
 ## API reference
 
-Register and login are public. Every other route needs `Authorization: Bearer <token>`. Errors: `{"error":"message"}`.
+Errors: `{"error":"message"}`.
 
-| Route | Auth | Purpose |
-|---|---|---|
-| `POST /users/register` | public | Create an account |
-| `POST /users/login` | public | Get a JWT |
-| `POST /expenses` | token | Record an expense |
-| `GET /expenses/monthly?month=YYYY-MM` | token | Month rows, ordered by date |
-| `GET /analytics?month=YYYY-MM` | token | Total + per-category sums |
-| `POST /receipts/upload` | token | Presigned S3 PUT URL (`501` if `RECEIPTS_BUCKET` unset) |
+| Route | Local Docker | AWS (API Gateway) | Purpose |
+|---|---|---|---|
+| `POST /users/register` | public | not deployed | Create account (local HS256) |
+| `POST /users/login` | public | not deployed | Get HS256 JWT (local) |
+| `POST /expenses` | Bearer | Cognito ID token | Record an expense |
+| `GET /expenses/monthly?month=YYYY-MM` | Bearer | Cognito ID token | Month rows |
+| `GET /analytics?month=YYYY-MM` | Bearer | Cognito ID token | Total + per-category |
+| `POST /receipts/upload` | Bearer | Cognito ID token | Presigned S3 PUT (`501` if no bucket) |
+
+On AWS, sign up / sign in with **Cognito** (see smoke-test below). Send the **ID token** as `Authorization: Bearer …` (not the access token).
 
 ### Behaviour notes
 
-- Emails are lowercased; duplicate → `409`.
-- Passwords must be 8–72 characters.
-- Wrong password and unknown email return the same `401`.
-- Tokens are HS256 JWTs, 24-hour expiry.
-- `amount` is a positive decimal string (stored with two decimals).
-- `category` is trimmed and lowercased; `date` is `YYYY-MM-DD`.
-- Owner always comes from the token; body `user_id` is ignored.
+- Local: emails lowercased; duplicate → `409`; passwords 8–72 chars; HS256 JWT, 24h.
+- AWS: Cognito `sub` is the expense owner (`user_id`).
+- `amount` is a positive decimal string (two decimals); `category` trimmed/lowercased; `date` is `YYYY-MM-DD`.
+- Owner always comes from auth context; body `user_id` is ignored.
 - Empty month → `[]` and `"0.00"`.
 
 ---
 
 ## How it is built
 
-### Two entrypoints, one handler set
+### Entrypoints
 
-- `cmd/api` — HTTP on `:8080` when `APP_MODE=http`; Lambda when `APP_MODE=lambda` (`algnhsa` adapts API Gateway HTTP API v2).
-- `cmd/authorizer` — verifies the JWT with the same `auth.Authorize()` used by local middleware; returns `user_id` in the authorizer context.
+- `cmd/api` — HTTP on `:8080` when `APP_MODE=http`; Lambda when `APP_MODE=lambda` (`algnhsa`).
+- Local middleware verifies HS256 JWTs. In Lambda mode the handler reads Cognito `sub` from API Gateway JWT authorizer context (no re-validation with a shared secret).
+- `cmd/authorizer` — phase 1 only; not deployed after Cognito.
 
 ### Swappable storage
 
@@ -189,7 +191,7 @@ Register and login are public. Every other route needs `Authorization: Bearer <t
 ```text
 backend/
   cmd/api/                 HTTP + Lambda business entrypoint
-  cmd/authorizer/          Phase 1 JWT authorizer
+  cmd/authorizer/          Phase 1 only (not deployed after Cognito)
   internal/auth|expense|analytics|store|id/
   Dockerfile
 docker-compose.yml
@@ -360,15 +362,6 @@ aws s3api put-bucket-versioning --bucket $BUCKET --versioning-configuration Stat
 aws s3api put-public-access-block --bucket $BUCKET `
   --public-access-block-configuration `
   BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-
-$SECRET = -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 48 | ForEach-Object {[char]$_})
-aws ssm put-parameter `
-  --name "/expense-tracker/dev/jwt-secret" `
-  --value $SECRET `
-  --type SecureString `
-  --overwrite `
-  --region us-east-1
-Remove-Variable SECRET
 ```
 
 Match `backend.tf` to your state bucket name (example):
@@ -379,7 +372,9 @@ key    = "expense-tracker/dev/terraform.tfstate"
 region = "us-east-1"
 ```
 
-### Build Lambda zips (before every apply that changes Go code)
+No SSM JWT secret is required for AWS after Cognito.
+
+### Build Lambda zip (before every apply that changes Go code)
 
 Runtime `provided.al2023` requires the binary inside the zip to be named `bootstrap`:
 
@@ -391,21 +386,16 @@ New-Item -ItemType Directory -Force -Path ..\infrastructure\terraform\environmen
 go build -o .\bootstrap .\cmd\api
 Compress-Archive -Force -Path .\bootstrap -DestinationPath ..\infrastructure\terraform\environments\dev\.lambda\api.zip
 
-go build -o .\bootstrap .\cmd\authorizer
-Compress-Archive -Force -Path .\bootstrap -DestinationPath ..\infrastructure\terraform\environments\dev\.lambda\authorizer.zip
-
 Remove-Item .\bootstrap -ErrorAction SilentlyContinue
 Remove-Item Env:GOOS; Remove-Item Env:GOARCH
 cd ..
-Test-Path .\infrastructure\terraform\environments\dev\.lambda\api.zip,
-          .\infrastructure\terraform\environments\dev\.lambda\authorizer.zip
+Test-Path .\infrastructure\terraform\environments\dev\.lambda\api.zip
 ```
 
 Create gitignored `infrastructure/terraform/environments/dev/terraform.tfvars` (paths relative to that directory):
 
 ```hcl
-api_zip_path        = "./.lambda/api.zip"
-authorizer_zip_path = "./.lambda/authorizer.zip"
+api_zip_path = "./.lambda/api.zip"
 ```
 
 ### Apply
@@ -419,22 +409,40 @@ terraform init
 terraform plan
 terraform apply
 terraform output api_endpoint
+terraform output cognito_user_pool_id
+terraform output cognito_client_id
 cd ..\..\..\..
 ```
 
-### Smoke-test the live API
+### Smoke-test the live API (Cognito)
+
+API Gateway expects a Cognito **ID token**. Sign up and confirm via CLI (email verification may be required in a fresh pool):
 
 ```powershell
+cd infrastructure\terraform\environments\dev
 $API = terraform output -raw api_endpoint
+$POOL = terraform output -raw cognito_user_pool_id
+$CLIENT = terraform output -raw cognito_client_id
+cd ..\..\..\..
 
-Invoke-RestMethod -Method POST -Uri "$API/users/register" `
-  -ContentType "application/json" `
-  -Body '{"email":"me@test.com","name":"Me","password":"password123"}'
+$email = "me@test.com"
+$pass = "Password123!"
 
-$login = Invoke-RestMethod -Method POST -Uri "$API/users/login" `
-  -ContentType "application/json" `
-  -Body '{"email":"me@test.com","password":"password123"}'
-$TOKEN = $login.token
+aws cognito-idp sign-up `
+  --client-id $CLIENT `
+  --username $email `
+  --password $pass `
+  --user-attributes Name=email,Value=$email
+
+# Dev convenience: confirm without reading email (requires IAM permission on the pool)
+aws cognito-idp admin-confirm-sign-up --user-pool-id $POOL --username $email
+
+$auth = aws cognito-idp initiate-auth `
+  --client-id $CLIENT `
+  --auth-flow USER_PASSWORD_AUTH `
+  --auth-parameters USERNAME=$email,PASSWORD=$pass `
+  --output json | ConvertFrom-Json
+$TOKEN = $auth.AuthenticationResult.IdToken
 
 Invoke-RestMethod -Method POST -Uri "$API/expenses" `
   -Headers @{ Authorization = "Bearer $TOKEN" } `
@@ -448,15 +456,13 @@ Invoke-RestMethod -Method GET -Uri "$API/analytics?month=2026-10" `
   -Headers @{ Authorization = "Bearer $TOKEN" } | ConvertTo-Json -Depth 5
 ```
 
-Verified previously against a live `dev` stack: register, login, create expense, monthly, analytics, and receipt upload all succeeded.
-
 ### Smoke-test receipt upload (after apply)
 
-Rebuild Lambda zips before apply whenever Go changes — otherwise AWS keeps the old binary.
+Rebuild the Lambda zip before apply whenever Go changes — otherwise AWS keeps the old binary.
 
 ```powershell
 $API = terraform output -raw api_endpoint
-# ... register, login → $TOKEN, create expense → $exp ...
+# ... Cognito login → $TOKEN, create expense → $exp ...
 
 $upload = Invoke-RestMethod -Method POST -Uri "$API/receipts/upload" `
   -Headers @{ Authorization = "Bearer $TOKEN" } `
@@ -540,43 +546,45 @@ Re-demo later: rebuild zips → `terraform apply` → smoke-test → empty bucke
 
 | Module | Creates |
 |---|---|
-| `database` | `users-{env}`, `expenses-{env}` (on-demand) |
+| `database` | `users-{env}`, `expenses-{env}` (on-demand; AWS expenses keyed by Cognito `sub`) |
 | `storage` | Private receipts bucket, SSE-S3, versioning, 30-day noncurrent expiry |
-| `monitoring` | 14-day log groups, one dashboard, one error alarm |
-| `api` | Two IAM roles, two Lambdas, HTTP API, REQUEST authorizer, routes; `RECEIPTS_BUCKET` on the business Lambda |
+| `cognito` | User pool + public app client (email username) |
+| `monitoring` | 14-day API log group, dashboard, error alarm |
+| `api` | One IAM role, business Lambda, HTTP API, **JWT** authorizer, protected routes |
 | `github-oidc` | GitHub Actions OIDC provider + deploy role (apply once via `environments/oidc`) |
 
 ```mermaid
 flowchart TD
   client[Client]
+  cognito[Cognito user pool]
   gateway[API Gateway HTTP API]
-  authorizer[Lambda authorizer]
+  jwtAuth[JWT authorizer]
   api[Business Lambda]
-  db[(DynamoDB)]
+  db[(DynamoDB expenses)]
   bucket[(S3)]
   logs[CloudWatch]
 
-  client -->|HTTPS and bearer token| gateway
-  gateway --> authorizer
-  authorizer -->|user_id| gateway
+  client -->|sign-up / sign-in| cognito
+  cognito -->|ID token| client
+  client -->|Bearer ID token| gateway
+  gateway --> jwtAuth
+  jwtAuth -->|claims.sub| gateway
   gateway --> api
   api --> db
   api -->|presigned PUT URL| client
   client -->|file bytes| bucket
   api --> logs
-  authorizer --> logs
 ```
 
 | Role | Allowed |
 |---|---|
-| Business Lambda | DynamoDB Get/Put/Query; S3 Get/Put on `receipts/*`; own logs. JWT secret injected at deploy (no `ssm:GetParameter` on the role). |
-| Authorizer Lambda | `ssm:GetParameter` on the JWT secret; own logs |
+| Business Lambda | DynamoDB on expenses table; S3 Get/Put on `receipts/*`; own logs. No JWT secret. |
 
-Both Lambdas stay outside a VPC.
+Lambda stays outside a VPC.
 
-### Phase 2 (later)
+### Staging
 
-Cognito replaces custom login. API Gateway JWT authorizer validates Cognito tokens. Register/login routes, `password_hash`, the authorizer Lambda, and the SSM secret go away. Expense handlers already key off `user_id` from authorizer context.
+`infrastructure/terraform/environments/staging` mirrors `dev` (separate state key and resource names). **Do not apply** unless you intentionally want a second stack; destroy when idle.
 
 ---
 
@@ -627,9 +635,9 @@ The trust policy allows only `repo:gazimaksudur2/aws-expense-tracker:*`.
 ### What happens on push to `main`
 
 1. CI runs unit + integration tests.
-2. Deploy builds `bootstrap` zips for `cmd/api` and `cmd/authorizer`.
+2. Deploy builds a `bootstrap` zip for `cmd/api`.
 3. `aws-actions/configure-aws-credentials` assumes `AWS_ROLE_ARN` via OIDC.
-4. `terraform apply` updates `dev` (uses the S3 state bucket and SSM JWT secret you already created).
+4. `terraform apply` updates `dev` (Cognito + JWT authorizer + API; uses the S3 state bucket).
 
 **Cost:** a push to `main` leaves the stack running. Destroy when idle:
 
@@ -661,16 +669,18 @@ Or add a manual destroy workflow later.
 | `curl` → invalid JSON / bad hostname on PowerShell | Use single-quoted JSON or `Invoke-RestMethod` |
 | IAM `MalformedPolicyDocument` | Policy JSON keys must be `Version`, `Statement`, `Effect`, `Action`, `Resource` (capital R) |
 | Lambda zip issues | Binary inside zip must be named `bootstrap`; rebuild with `GOOS=linux GOARCH=amd64` |
-| Live API still says `receipt upload arrives in step 7` | Old zip deployed — rebuild zips and `terraform apply` again |
+| Live API still says `receipt upload arrives in step 7` | Old zip deployed — rebuild zip and `terraform apply` again |
 | S3 `Request has expired` on PUT | Presigned URL is 5 minutes — request a new URL and upload immediately |
 | `terraform destroy` → S3 `BucketNotEmpty` | Receipts bucket is versioned — delete all versions/delete markers (see Destroy section), then destroy again |
 | Deploy workflow `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Secret alone is not enough — IAM trust `sub` must match the token. New GitHub repos use immutable form `repo:ORG@OWNER_ID/REPO@REPO_ID:ref:...` (see CloudTrail). Update `environments/oidc` IDs and `terraform apply`, then re-run the workflow. Also check secret has no quotes/whitespace. |
+| AWS API returns `401` with a Cognito access token | Use the **IdToken** from `initiate-auth`, not `AccessToken` |
+| Cognito `UserNotConfirmedException` | `admin-confirm-sign-up` (dev) or complete email verification |
 
 ---
 
 ## Still to do
 
-1. Set GitHub Actions secret `AWS_ROLE_ARN` to `arn:aws:iam::611728563978:role/expense-tracker-github-actions` (OIDC role already applied)
-2. Optionally read `user_id` only from API Gateway authorizer context in Lambda mode
-3. Cognito (phase 2)
-4. Staging/prod root modules (apply only when needed)
+1. Optional: delete unused SSM `/expense-tracker/dev/jwt-secret` and remove `cmd/authorizer` from the tree
+2. Optional: DynamoDB users table PK → Cognito `sub` + profile endpoints (expenses already use `sub`)
+3. Prod root module (apply only when needed)
+4. Architecture diagram asset (Mermaid in README is the living diagram)

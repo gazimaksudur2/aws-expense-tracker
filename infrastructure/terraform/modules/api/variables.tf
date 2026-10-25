@@ -1,43 +1,35 @@
 variable "environment" {
-    description = "Environment name used in resource names (dev, staging, prod)"
-    type = string
-}
-
-variable "users_table_name" {
-    type = string
-}
-
-variable "users_table_arn" {
-    type = string
+  description = "Environment name used in resource names (dev, staging, prod)"
+  type        = string
 }
 
 variable "expenses_table_name" {
-    type = string
+  type = string
 }
 
 variable "expenses_table_arn" {
-    type = string
+  type = string
 }
 
 variable "receipts_bucket_name" {
-    type = string
+  type = string
 }
 
 variable "receipts_bucket_arn" {
-    type = string
+  type = string
 }
 
-variable "jwt_secret_param_name" {
-    description = "SSM parameter name for the Jwt signing secret."
-    type = string
+variable "cognito_issuer" {
+  description = "Cognito user pool issuer URL (https://cognito-idp.REGION.amazonaws.com/POOL_ID)."
+  type        = string
+}
+
+variable "cognito_client_id" {
+  description = "Cognito app client ID (JWT audience)."
+  type        = string
 }
 
 variable "api_zip_path" {
-    description = "Path to the business Lambda zip (bootstrap binary inside)."
-    type = string
-}
-
-variable "authorizer_zip_path" {
-    description = "Path to the authorizer Lambda zip (bootstrap binary inside)."
-    type = string
+  description = "Path to the business Lambda zip (bootstrap binary inside)."
+  type        = string
 }

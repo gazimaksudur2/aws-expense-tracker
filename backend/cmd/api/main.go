@@ -15,9 +15,11 @@ import (
 )
 
 func main() {
+	mode := os.Getenv("APP_MODE")
 	secret := os.Getenv("JWT_SECRET")
-	if secret == "" {
-		log.Fatal("JWT_SECRET must be set")
+	// Local/Docker still signs HS256 tokens. Lambda trusts API Gateway Cognito JWT authorizer.
+	if mode != "lambda" && secret == "" {
+		log.Fatal("JWT_SECRET must be set when APP_MODE is not lambda")
 	}
 
 	users, expenses := buildStores()
@@ -40,7 +42,7 @@ func main() {
 		receipts: presigner,
 	}
 
-	switch os.Getenv("APP_MODE") {
+	switch mode {
 	case "lambda":
 		algnhsa.ListenAndServe(srv.routes(), nil)
 	default: // "http"
@@ -52,21 +54,34 @@ func main() {
 func buildStores() (auth.UserStore, expense.Store) {
 	usersTable := os.Getenv("USERS_TABLE")
 	expensesTable := os.Getenv("EXPENSES_TABLE")
-	if usersTable == "" || expensesTable == "" {
-		log.Println("USERS_TABLE and EXPENSES_TABLE must be set: using in-memory stores")
+
+	if expensesTable == "" {
+		log.Println("EXPENSES_TABLE unset: using in-memory stores")
 		return auth.NewMemUserStore(), expense.NewMemStore()
 	}
 
+	// DynamoStore constructor needs a users table name; Cognito Lambda leaves USERS_TABLE unset.
+	dynamoUsers := usersTable
+	if dynamoUsers == "" {
+		dynamoUsers = "users"
+	}
+
 	endpoint := os.Getenv("DYNAMODB_ENDPOINT")
-	ds, err := store.NewDynamo(context.Background(), endpoint, usersTable, expensesTable)
+	ds, err := store.NewDynamo(context.Background(), endpoint, dynamoUsers, expensesTable)
 	if err != nil {
 		log.Fatalf("dynamodb client: %v", err)
 	}
 	if endpoint != "" {
 		ensureTablesWithRetry(ds)
 	}
-	log.Printf("using DynamoDB (users=%s, expenses=%s endpoint=%q)", usersTable, expensesTable, endpoint)
-	return ds, ds
+
+	var users auth.UserStore = ds
+	if usersTable == "" {
+		log.Println("USERS_TABLE unset: Cognito owns identity; using in-memory user store")
+		users = auth.NewMemUserStore()
+	}
+	log.Printf("using DynamoDB (users=%s, expenses=%s endpoint=%q)", dynamoUsers, expensesTable, endpoint)
+	return users, ds
 }
 
 func ensureTablesWithRetry(ds *store.DynamoStore) {

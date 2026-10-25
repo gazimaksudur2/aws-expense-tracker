@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/akrylysov/algnhsa"
 	"github.com/gazimaksudur2/aws-expense-tracker/internal/analytics"
 	"github.com/gazimaksudur2/aws-expense-tracker/internal/auth"
 	"github.com/gazimaksudur2/aws-expense-tracker/internal/expense"
@@ -34,9 +35,11 @@ type server struct {
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
 
-	// Public routes
-	mux.HandleFunc("POST /users/register", s.handleRegister)
-	mux.HandleFunc("POST /users/login", s.handleLogin)
+	// Local/Docker only: Cognito owns register/login on AWS (no API Gateway routes).
+	if s.secret != "" {
+		mux.HandleFunc("POST /users/register", s.handleRegister)
+		mux.HandleFunc("POST /users/login", s.handleLogin)
+	}
 
 	// Protected routes
 	mux.Handle("POST /expenses", s.authMiddleware(http.HandlerFunc(s.handleCreateExpense)))
@@ -79,9 +82,21 @@ func validMonth(m string) bool {
 
 // ---- middleware ----
 
-// authMiddleware calls the same auth.Authorize the Lambda authorizer uses.
+// authMiddleware sets contextKeyUserID from API Gateway authorizer context (Lambda)
+// or from a local HS256 JWT (Docker / APP_MODE=http).
 func (s *server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if userID, ok := userIDFromAuthorizer(r.Context()); ok {
+			ctx := context.WithValue(r.Context(), contextKeyUserID, userID)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		if s.secret == "" {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
 		header := r.Header.Get("Authorization")
 		token, found := strings.CutPrefix(header, "Bearer ")
 		if !found || token == "" {
@@ -96,6 +111,26 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), contextKeyUserID, userID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// userIDFromAuthorizer reads Cognito JWT `sub` (phase 2) or legacy Lambda authorizer user_id.
+func userIDFromAuthorizer(ctx context.Context) (string, bool) {
+	event, ok := algnhsa.APIGatewayV2RequestFromContext(ctx)
+	if !ok || event.RequestContext.Authorizer == nil {
+		return "", false
+	}
+	authz := event.RequestContext.Authorizer
+	if authz.JWT != nil {
+		if sub := authz.JWT.Claims["sub"]; sub != "" {
+			return sub, true
+		}
+	}
+	if authz.Lambda != nil {
+		if v, ok := authz.Lambda["user_id"].(string); ok && v != "" {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 // ---- public handlers ----

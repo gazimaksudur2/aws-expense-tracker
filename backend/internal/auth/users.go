@@ -10,7 +10,7 @@ var (
 	ErrUserNotFound = errors.New("user not found")
 )
 
-// User is a phase 1 account. Phase 2 (Cognito) drops PasswordHash.
+// User is a local/Docker account (HS256 auth). On AWS, Cognito owns identity.
 type User struct {
 	UserID       string
 	Email        string

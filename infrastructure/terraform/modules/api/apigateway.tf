@@ -8,15 +8,17 @@ resource "aws_apigatewayv2_api" "http" {
   }
 }
 
-resource "aws_apigatewayv2_authorizer" "jwt" {
-  api_id                            = aws_apigatewayv2_api.http.id
-  authorizer_type                   = "REQUEST"
-  authorizer_uri                    = aws_lambda_function.authorizer.invoke_arn
-  identity_sources                  = ["$request.header.Authorization"]
-  name                              = "jwt"
-  authorizer_payload_format_version = "2.0"
-  enable_simple_responses           = true
-  authorizer_result_ttl_in_seconds  = 0
+# Built-in JWT authorizer (Cognito ID tokens). No Lambda authorizer.
+resource "aws_apigatewayv2_authorizer" "cognito" {
+  api_id           = aws_apigatewayv2_api.http.id
+  authorizer_type  = "JWT"
+  identity_sources = ["$request.header.Authorization"]
+  name             = "cognito"
+
+  jwt_configuration {
+    audience = [var.cognito_client_id]
+    issuer   = var.cognito_issuer
+  }
 }
 
 resource "aws_apigatewayv2_integration" "api" {
@@ -26,50 +28,37 @@ resource "aws_apigatewayv2_integration" "api" {
   payload_format_version = "2.0"
 }
 
-# Public routes
-resource "aws_apigatewayv2_route" "register" {
-  api_id    = aws_apigatewayv2_api.http.id
-  route_key = "POST /users/register"
-  target    = "integrations/${aws_apigatewayv2_integration.api.id}"
-}
-
-resource "aws_apigatewayv2_route" "login" {
-  api_id    = aws_apigatewayv2_api.http.id
-  route_key = "POST /users/login"
-  target    = "integrations/${aws_apigatewayv2_integration.api.id}"
-}
-
-# Protected routes
+# Protected routes — Cognito owns register/login; those routes are not on the API.
 resource "aws_apigatewayv2_route" "create_expense" {
   api_id             = aws_apigatewayv2_api.http.id
   route_key          = "POST /expenses"
   target             = "integrations/${aws_apigatewayv2_integration.api.id}"
-  authorization_type = "CUSTOM"
-  authorizer_id      = aws_apigatewayv2_authorizer.jwt.id
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito.id
 }
 
 resource "aws_apigatewayv2_route" "monthly_expenses" {
   api_id             = aws_apigatewayv2_api.http.id
   route_key          = "GET /expenses/monthly"
   target             = "integrations/${aws_apigatewayv2_integration.api.id}"
-  authorization_type = "CUSTOM"
-  authorizer_id      = aws_apigatewayv2_authorizer.jwt.id
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito.id
 }
 
 resource "aws_apigatewayv2_route" "analytics" {
   api_id             = aws_apigatewayv2_api.http.id
   route_key          = "GET /analytics"
   target             = "integrations/${aws_apigatewayv2_integration.api.id}"
-  authorization_type = "CUSTOM"
-  authorizer_id      = aws_apigatewayv2_authorizer.jwt.id
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito.id
 }
 
 resource "aws_apigatewayv2_route" "receipts_upload" {
   api_id             = aws_apigatewayv2_api.http.id
   route_key          = "POST /receipts/upload"
   target             = "integrations/${aws_apigatewayv2_integration.api.id}"
-  authorization_type = "CUSTOM"
-  authorizer_id      = aws_apigatewayv2_authorizer.jwt.id
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito.id
 }
 
 resource "aws_apigatewayv2_stage" "default" {

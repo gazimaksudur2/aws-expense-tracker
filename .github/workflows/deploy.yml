@@ -30,15 +30,13 @@ jobs:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
 
-      - name: Build Lambda zips
+      - name: Build Lambda zip
         working-directory: backend
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/lambda"
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$RUNNER_TEMP/lambda/bootstrap" ./cmd/api
           (cd "$RUNNER_TEMP/lambda" && zip -q api.zip bootstrap)
-          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$RUNNER_TEMP/lambda/bootstrap" ./cmd/authorizer
-          (cd "$RUNNER_TEMP/lambda" && zip -q authorizer.zip bootstrap)
           ls -la "$RUNNER_TEMP/lambda"
 
       - name: Configure AWS credentials (OIDC)
@@ -59,14 +57,18 @@ jobs:
         working-directory: infrastructure/terraform/environments/dev
         env:
           TF_VAR_api_zip_path: ${{ runner.temp }}/lambda/api.zip
-          TF_VAR_authorizer_zip_path: ${{ runner.temp }}/lambda/authorizer.zip
         run: |
           terraform apply -input=false -auto-approve
           echo "API_ENDPOINT=$(terraform output -raw api_endpoint)" >> "$GITHUB_ENV"
+          echo "COGNITO_POOL=$(terraform output -raw cognito_user_pool_id)" >> "$GITHUB_ENV"
+          echo "COGNITO_CLIENT=$(terraform output -raw cognito_client_id)" >> "$GITHUB_ENV"
 
       - name: Summary
         run: |
           echo "### Deployed dev" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- API: \`${API_ENDPOINT}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Cognito pool: \`${COGNITO_POOL}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Cognito client: \`${COGNITO_CLIENT}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Use Cognito ID tokens (not access tokens) as Bearer auth." >> "$GITHUB_STEP_SUMMARY"
           echo "- Remember to \`terraform destroy\` when not demoing (free tier)." >> "$GITHUB_STEP_SUMMARY"

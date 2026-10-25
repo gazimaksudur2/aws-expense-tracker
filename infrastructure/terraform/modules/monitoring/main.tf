@@ -8,16 +8,6 @@ resource "aws_cloudwatch_log_group" "api" {
   }
 }
 
-resource "aws_cloudwatch_log_group" "authorizer" {
-  name              = "/aws/lambda/${var.authorizer_function_name}"
-  retention_in_days = 14
-
-  tags = {
-    Environment = var.environment
-    Project     = "expense-tracker"
-  }
-}
-
 resource "aws_cloudwatch_metric_alarm" "api_errors" {
   alarm_name          = "expense-tracker-${var.environment}-api-errors"
   comparison_operator = "GreaterThanThreshold"
@@ -56,7 +46,6 @@ resource "aws_cloudwatch_dashboard" "main" {
           region = data.aws_region.current.name
           metrics = [
             ["AWS/Lambda", "Invocations", "FunctionName", var.api_function_name, { label = "api" }],
-            [".", "Invocations", ".", var.authorizer_function_name, { label = "authorizer" }],
           ]
           stat   = "Sum"
           period = 300
@@ -73,7 +62,6 @@ resource "aws_cloudwatch_dashboard" "main" {
           region = data.aws_region.current.name
           metrics = [
             ["AWS/Lambda", "Errors", "FunctionName", var.api_function_name, { label = "api" }],
-            [".", "Errors", ".", var.authorizer_function_name, { label = "authorizer" }],
           ]
           stat   = "Sum"
           period = 300
