@@ -642,7 +642,7 @@ Or add a manual destroy workflow later.
 | Live API still says `receipt upload arrives in step 7` | Old zip deployed — rebuild zips and `terraform apply` again |
 | S3 `Request has expired` on PUT | Presigned URL is 5 minutes — request a new URL and upload immediately |
 | `terraform destroy` → S3 `BucketNotEmpty` | Receipts bucket is versioned — delete all versions/delete markers (see Destroy section), then destroy again |
-| Deploy workflow `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Apply `environments/oidc`, set `AWS_ROLE_ARN` secret, ensure repo name matches the trust policy |
+| Deploy workflow `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Secret alone is not enough — IAM trust `sub` must match the token. New GitHub repos use immutable form `repo:ORG@OWNER_ID/REPO@REPO_ID:ref:...` (see CloudTrail). Update `environments/oidc` IDs and `terraform apply`, then re-run the workflow. Also check secret has no quotes/whitespace. |
 
 ---
 

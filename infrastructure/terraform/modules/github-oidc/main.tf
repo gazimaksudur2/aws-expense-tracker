@@ -26,11 +26,19 @@ data "aws_iam_policy_document" "assume_role" {
       values   = ["sts.amazonaws.com"]
     }
 
-    # Limit to this repository (any branch/ref). Tighten to ref:refs/heads/main if desired.
+    # Limit to this repository (any branch/ref).
+    # Repos created/opted-in after GitHub's immutable-sub change emit:
+    #   repo:ORG@OWNER_ID/REPO@REPO_ID:ref:refs/heads/main
+    # Older repos may still emit the classic form without @IDs.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_org}/${var.github_repo}:*"]
+      values = compact([
+        "repo:${var.github_org}/${var.github_repo}:*",
+        var.github_owner_id != "" && var.github_repo_id != ""
+        ? "repo:${var.github_org}@${var.github_owner_id}/${var.github_repo}@${var.github_repo_id}:*"
+        : null,
+      ])
     }
   }
 }
