@@ -10,4 +10,5 @@ debug-*.log
 *.json
 *.xml
 *.html
-*.css
+*.css\
+.cursorignore

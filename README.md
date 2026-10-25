@@ -1,10 +1,10 @@
 # Expense Tracker API
 
-A Go expense API. Locally it runs in Docker against DynamoDB Local. In AWS it is meant to run as two Lambdas behind an API Gateway HTTP API, with DynamoDB, S3, and CloudWatch provisioned by Terraform.
+A Go expense API. Locally it runs in Docker against DynamoDB Local. In AWS it runs as two Lambdas behind an API Gateway HTTP API, with DynamoDB, S3, and CloudWatch provisioned by Terraform.
 
 You register, log an expense, and read a month as rows and category totals. Every expense belongs to the signed-in user.
 
-**Local path is complete and verified.** Terraform for `dev` is written and initialized; the first `apply` is the next milestone.
+**Local path is complete.** The `dev` stack has been applied, smoke-tested on AWS (register → login → create expense → monthly → analytics), and **destroyed** so the account stays near free tier when idle. Re-apply anytime to demo.
 
 ## Status
 
@@ -15,12 +15,23 @@ You register, log an expense, and read a month as rows and category totals. Ever
 | 3 | DynamoDB store, startup table creation, integration tests | Done |
 | 4 | Business Lambda entrypoint (`APP_MODE=lambda` via `algnhsa`) | Done |
 | 5 | Authorizer Lambda (`cmd/authorizer`) | Done |
-| 6–9 | Terraform modules (`database`, `storage`, `monitoring`, `api`) + `environments/dev` | Written — not applied yet |
+| 6–9 | Terraform modules + `environments/dev`; apply, smoke-test, destroy | Done |
 | 10–11 | Staging/prod apply, GitHub Actions + OIDC | Planned |
 | 12 | Cognito JWT authorizer (phase 2) | Planned |
 | 13 | Architecture diagram asset | Planned |
 
 `POST /receipts/upload` still returns `501` until the S3 presigned PUT handler is wired.
+
+### What stays in AWS after `terraform destroy`
+
+These were created once by hand and are **not** in the Terraform stack. Keep them; they cost effectively nothing:
+
+| Resource | Example |
+|---|---|
+| Terraform state bucket | `expense-tracker-tfstate-<account-id>` |
+| JWT secret (SSM SecureString) | `/expense-tracker/dev/jwt-secret` |
+
+---
 
 ## Prerequisites
 
@@ -28,10 +39,12 @@ You register, log an expense, and read a month as rows and category totals. Ever
 |---|---|
 | Go 1.26+ | Backend language |
 | Docker Desktop | Local API + DynamoDB Local |
-| AWS CLI v2 | `aws login` or IAM access keys |
+| AWS CLI v2 | Prefer an **IAM user with access keys** for Terraform (see below) |
 | Terraform ≥ 1.5 | Infrastructure |
 
-## Project initialization
+---
+
+## Project initialization (local)
 
 ### 1. Clone and enter the repo
 
@@ -39,24 +52,23 @@ You register, log an expense, and read a month as rows and category totals. Ever
 cd D:\DevProjects\PersonalProjects\aws-expense-tracker
 ```
 
-### 2. Install Go dependencies
+### 2. Install Go dependencies and run tests
 
 ```powershell
 cd backend
 go mod tidy
 go test ./...
+go test -race ./...
 ```
 
-### 3. Run locally with Docker (primary path)
+### 3. Run locally with Docker
 
-From the **repo root**:
+From the **repo root** (not `backend/`):
 
 ```powershell
 cd D:\DevProjects\PersonalProjects\aws-expense-tracker
 docker compose up --build
 ```
-
-This starts:
 
 | Service | Port |
 |---|---|
@@ -71,33 +83,53 @@ Optional LocalStack (S3 only, for later receipt work):
 docker compose --profile aws up --build
 ```
 
-### 4. Smoke-test the local API
+### 4. Smoke-test the local API (PowerShell)
+
+Use **single-quoted** JSON bodies so PowerShell does not mangle escapes:
 
 ```powershell
 curl.exe -X POST http://localhost:8080/users/register `
   -H "Content-Type: application/json" `
-  -d "{\"email\":\"me@test.com\",\"name\":\"Me\",\"password\":\"password123\"}"
+  -d '{"email":"me@test.com","name":"Me","password":"password123"}'
 
 curl.exe -X POST http://localhost:8080/users/login `
   -H "Content-Type: application/json" `
-  -d "{\"email\":\"me@test.com\",\"password\":\"password123\"}"
+  -d '{"email":"me@test.com","password":"password123"}'
 ```
 
-Copy the `token`, then:
+Or with `Invoke-RestMethod`:
 
 ```powershell
-curl.exe -X POST http://localhost:8080/expenses `
-  -H "Authorization: Bearer <token>" `
-  -H "Content-Type: application/json" `
-  -d "{\"amount\":\"42.50\",\"category\":\"groceries\",\"date\":\"2026-10-10\"}"
+$login = Invoke-RestMethod -Method POST -Uri http://localhost:8080/users/login `
+  -ContentType "application/json" `
+  -Body '{"email":"me@test.com","password":"password123"}'
+$TOKEN = $login.token
 
-curl.exe "http://localhost:8080/expenses/monthly?month=2026-10" -H "Authorization: Bearer <token>"
-curl.exe "http://localhost:8080/analytics?month=2026-10" -H "Authorization: Bearer <token>"
+Invoke-RestMethod -Method POST -Uri http://localhost:8080/expenses `
+  -Headers @{ Authorization = "Bearer $TOKEN" } `
+  -ContentType "application/json" `
+  -Body '{"amount":"42.50","category":"groceries","date":"2026-10-10"}'
+
+Invoke-RestMethod -Method GET -Uri "http://localhost:8080/expenses/monthly?month=2026-10" `
+  -Headers @{ Authorization = "Bearer $TOKEN" }
+
+Invoke-RestMethod -Method GET -Uri "http://localhost:8080/analytics?month=2026-10" `
+  -Headers @{ Authorization = "Bearer $TOKEN" } | ConvertTo-Json -Depth 5
 ```
 
 Data survives `docker compose restart api`. `docker compose down` wipes DynamoDB Local (`-inMemory`).
 
-## API
+### Integration tests
+
+```powershell
+docker compose up -d dynamodb
+cd backend
+go test -tags=integration ./internal/store -v
+```
+
+---
+
+## API reference
 
 Register and login are public. Every other route needs `Authorization: Bearer <token>`. Errors: `{"error":"message"}`.
 
@@ -121,6 +153,8 @@ Register and login are public. Every other route needs `Authorization: Bearer <t
 - Owner always comes from the token; body `user_id` is ignored.
 - Empty month → `[]` and `"0.00"`.
 
+---
+
 ## How it is built
 
 ### Two entrypoints, one handler set
@@ -139,7 +173,7 @@ Register and login are public. Every other route needs `Authorization: Bearer <t
 **users:** PK `email`.  
 **expenses:** PK `user_id`, SK `sk` = `date#expense_id`. Monthly report = one `Query` with `begins_with(sk, "YYYY-MM")`. No scans.
 
-## Repository layout
+### Repository layout
 
 ```text
 backend/
@@ -155,49 +189,10 @@ infrastructure/terraform/
     monitoring/            Log groups, dashboard, alarm
     api/                   IAM, Lambdas, HTTP API, authorizer, routes
   environments/
-    dev/                   Root module to apply (written)
+    dev/                   Root module (apply this)
     staging/               Placeholder
     prod/                  Placeholder
 ```
-
-## Development commands
-
-### Unit / handler tests (no Docker)
-
-```powershell
-cd backend
-go test ./...
-go test -race ./...
-```
-
-### Integration tests (DynamoDB Local)
-
-```powershell
-# from repo root
-docker compose up -d dynamodb
-cd backend
-go test -tags=integration ./internal/store -v
-```
-
-### Build Lambda zips (Windows)
-
-Runtime `provided.al2023` requires the binary inside the zip to be named `bootstrap`:
-
-```powershell
-cd backend
-$env:GOOS = "linux"; $env:GOARCH = "amd64"
-
-go build -o $env:TEMP\bootstrap .\cmd\api
-Compress-Archive -Force -Path $env:TEMP\bootstrap -DestinationPath $env:TEMP\api.zip
-
-go build -o $env:TEMP\bootstrap .\cmd\authorizer
-Compress-Archive -Force -Path $env:TEMP\bootstrap -DestinationPath $env:TEMP\authorizer.zip
-
-Remove-Item Env:GOOS; Remove-Item Env:GOARCH
-Test-Path $env:TEMP\api.zip, $env:TEMP\authorizer.zip
-```
-
-Point `infrastructure/terraform/environments/dev/terraform.tfvars` at those paths (file is gitignored).
 
 ### Local env vars (Compose sets these)
 
@@ -209,16 +204,128 @@ Point `infrastructure/terraform/environments/dev/terraform.tfvars` at those path
 | `EXPENSES_TABLE` | `expenses` |
 | `DYNAMODB_ENDPOINT` | `http://dynamodb:8000` |
 
-## Deploy to AWS (`dev`)
+---
 
-Terraform code for `dev` is ready. Nothing is applied until you run `terraform apply`.
+## AWS credentials (important)
 
-### One-time AWS account prep
+### Why `aws login` fights you
 
-Region: **`us-east-1`**.
+| Tool | What it uses |
+|---|---|
+| AWS CLI after `aws login` | Browser login session on the profile |
+| Terraform AWS provider | SDK chain: env vars → `~/.aws/credentials` → … |
+
+Problems you will hit with `aws login` alone:
+
+1. Terraform often **cannot** see the login session → `No valid credential sources found`.
+2. If you `export-credentials` into `$env:AWS_*` and those expire, later `aws sts` fails with `ExpiredToken` even after a fresh `aws login`, because **env vars override** the profile.
+3. Session tokens expire (often within hours).
+
+**Recommendation:** create an IAM user with long-lived access keys for day-to-day CLI + Terraform. Use `aws login` only for one-off console-style access if you want.
+
+### Recommended: IAM user with access keys (long-term)
+
+Do this once while logged in as root (or an admin). Prefer **not** using root for daily work afterward.
+
+#### 1. Create the user (Console)
+
+1. AWS Console → **IAM** → **Users** → **Create user**
+2. Name: e.g. `expense-tracker-dev`
+3. **Attach policies directly** for learning (tighten later):
+   - `AdministratorAccess` is simplest for a personal sandbox, **or**
+   - a narrower set: IAM, Lambda, API Gateway, DynamoDB, S3, SSM, CloudWatch, CloudWatch Logs
+4. Create user → open the user → **Security credentials** → **Create access key**
+5. Use case: **Command Line Interface (CLI)**
+6. Copy **Access key ID** and **Secret access key** once (secret is shown only once)
+
+#### 2. Or create via CLI (if you already have working admin creds)
+
+```powershell
+aws iam create-user --user-name expense-tracker-dev
+
+aws iam attach-user-policy `
+  --user-name expense-tracker-dev `
+  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+
+aws iam create-access-key --user-name expense-tracker-dev
+```
+
+Save the printed `AccessKeyId` and `SecretAccessKey`.
+
+#### 3. Configure the CLI profile (no more `aws login` for Terraform)
+
+```powershell
+# Clear any leftover temporary session env vars first
+Remove-Item Env:AWS_ACCESS_KEY_ID -ErrorAction SilentlyContinue
+Remove-Item Env:AWS_SECRET_ACCESS_KEY -ErrorAction SilentlyContinue
+Remove-Item Env:AWS_SESSION_TOKEN -ErrorAction SilentlyContinue
+
+aws configure
+# AWS Access Key ID:     <from IAM>
+# AWS Secret Access Key: <from IAM>
+# Default region:        us-east-1
+# Default output:        json
+```
+
+Verify:
+
+```powershell
+aws sts get-caller-identity
+```
+
+You should see an ARN like:
+
+```text
+arn:aws:iam::611728563978:user/expense-tracker-dev
+```
+
+not `:root`.
+
+Terraform and the CLI now share `~/.aws/credentials`. No export step, no browser login expiry for normal `plan` / `apply` / `destroy`.
+
+#### 4. Security hygiene
+
+- Never commit access keys, `terraform.tfvars`, or files like `setcredentials.txt`.
+- Do not paste secrets into the repo or chat logs.
+- Rotate keys if they leak: IAM → user → create new key → delete old key.
+- For CI later, prefer **GitHub OIDC** (no long-lived keys in GitHub secrets).
+
+### If you still use `aws login` temporarily
 
 ```powershell
 aws login
+
+# Drop expired env overrides
+Remove-Item Env:AWS_ACCESS_KEY_ID, Env:AWS_SECRET_ACCESS_KEY, Env:AWS_SESSION_TOKEN -ErrorAction SilentlyContinue
+
+aws sts get-caller-identity
+
+# Only if Terraform still cannot find creds — export into THIS shell only
+aws configure export-credentials --format env
+# Convert to PowerShell:
+# $env:AWS_ACCESS_KEY_ID = "..."
+# $env:AWS_SECRET_ACCESS_KEY = "..."
+# $env:AWS_SESSION_TOKEN = "..."
+$env:AWS_REGION = "us-east-1"
+```
+
+Never save exported session tokens into a tracked file.
+
+---
+
+## Deploy to AWS (`dev`) — full runbook
+
+Region: **`us-east-1`**. Always run Terraform from:
+
+```text
+infrastructure/terraform/environments/dev
+```
+
+not the repo root.
+
+### One-time account prep (already done for this project)
+
+```powershell
 aws sts get-caller-identity
 
 $ACCOUNT = "<your-12-digit-account-id>"
@@ -240,31 +347,45 @@ aws ssm put-parameter `
 Remove-Variable SECRET
 ```
 
-Update `environments/dev/backend.tf` if your state bucket name differs.
+Match `backend.tf` to your state bucket name (example):
 
-### Important: `aws login` vs Terraform
+```hcl
+bucket = "expense-tracker-tfstate-611728563978"
+key    = "expense-tracker/dev/terraform.tfstate"
+region = "us-east-1"
+```
 
-The AWS CLI understands `aws login` sessions. The Terraform AWS provider often does **not**. After login, export credentials into the shell before `plan` / `apply`.
+### Build Lambda zips (before every apply that changes Go code)
 
-### Apply sequence (PowerShell)
+Runtime `provided.al2023` requires the binary inside the zip to be named `bootstrap`:
 
 ```powershell
-# 1) Auth
-aws login
+cd D:\DevProjects\PersonalProjects\aws-expense-tracker\backend
+$env:GOOS = "linux"; $env:GOARCH = "amd64"
+
+go build -o $env:TEMP\bootstrap .\cmd\api
+Compress-Archive -Force -Path $env:TEMP\bootstrap -DestinationPath $env:TEMP\api.zip
+
+go build -o $env:TEMP\bootstrap .\cmd\authorizer
+Compress-Archive -Force -Path $env:TEMP\bootstrap -DestinationPath $env:TEMP\authorizer.zip
+
+Remove-Item Env:GOOS; Remove-Item Env:GOARCH
+Test-Path $env:TEMP\api.zip, $env:TEMP\authorizer.zip
+```
+
+Create gitignored `infrastructure/terraform/environments/dev/terraform.tfvars`:
+
+```hcl
+api_zip_path        = "C:/Users/<you>/AppData/Local/Temp/api.zip"
+authorizer_zip_path = "C:/Users/<you>/AppData/Local/Temp/authorizer.zip"
+```
+
+### Apply
+
+```powershell
+# Creds: IAM user via `aws configure` (preferred), or aws login + export as above
 aws sts get-caller-identity
 
-# 2) Export session so Terraform can use it
-aws configure export-credentials --format env
-# Then set (use your exported values):
-# $env:AWS_ACCESS_KEY_ID = "..."
-# $env:AWS_SECRET_ACCESS_KEY = "..."
-# $env:AWS_SESSION_TOKEN = "..."
-$env:AWS_REGION = "us-east-1"
-$env:AWS_SDK_LOAD_CONFIG = "1"
-
-# 3) Rebuild zips (see above), confirm terraform.tfvars paths
-
-# 4) Plan / apply from the dev root module — not the repo root
 cd D:\DevProjects\PersonalProjects\aws-expense-tracker\infrastructure\terraform\environments\dev
 terraform init
 terraform plan
@@ -272,24 +393,64 @@ terraform apply
 terraform output api_endpoint
 ```
 
-Prefer an IAM user with access keys (`aws configure`) for day-to-day Terraform instead of root + `aws login`.
-
-### After a successful apply
+### Smoke-test the live API
 
 ```powershell
 $API = terraform output -raw api_endpoint
-curl.exe -X POST "$API/users/register" -H "Content-Type: application/json" `
-  -d "{\"email\":\"me@test.com\",\"name\":\"Me\",\"password\":\"password123\"}"
+
+Invoke-RestMethod -Method POST -Uri "$API/users/register" `
+  -ContentType "application/json" `
+  -Body '{"email":"me@test.com","name":"Me","password":"password123"}'
+
+$login = Invoke-RestMethod -Method POST -Uri "$API/users/login" `
+  -ContentType "application/json" `
+  -Body '{"email":"me@test.com","password":"password123"}'
+$TOKEN = $login.token
+
+Invoke-RestMethod -Method POST -Uri "$API/expenses" `
+  -Headers @{ Authorization = "Bearer $TOKEN" } `
+  -ContentType "application/json" `
+  -Body '{"amount":"42.50","category":"groceries","date":"2026-10-10"}'
+
+Invoke-RestMethod -Method GET -Uri "$API/expenses/monthly?month=2026-10" `
+  -Headers @{ Authorization = "Bearer $TOKEN" }
+
+Invoke-RestMethod -Method GET -Uri "$API/analytics?month=2026-10" `
+  -Headers @{ Authorization = "Bearer $TOKEN" } | ConvertTo-Json -Depth 5
 ```
 
-Protected routes may need a small handler follow-up so `user_id` is read from API Gateway authorizer context (`authorizer.lambda.user_id`) as well as local middleware context.
+Verified previously against a live `dev` stack: register, login, create expense, monthly, and analytics all succeeded.
 
-### Tear down when not demoing
+### Destroy (stay near free tier when not demoing)
 
 ```powershell
-cd infrastructure\terraform\environments\dev
+aws sts get-caller-identity   # fix creds first if this fails
+
+cd D:\DevProjects\PersonalProjects\aws-expense-tracker\infrastructure\terraform\environments\dev
 terraform destroy
+# type yes
+
+# Confirm
+terraform show
+aws lambda list-functions --query "Functions[?contains(FunctionName, 'expense-tracker')].FunctionName"
+aws apigatewayv2 get-apis --query "Items[?contains(Name, 'expense-tracker')].Name"
 ```
+
+Expect: `The state file is empty`, and `[]` / `[]` for Lambda and API Gateway queries.
+
+**Last verified destroy:** 29 resources removed successfully.
+
+Re-demo later: rebuild zips → `terraform apply` → smoke-test → `terraform destroy` when finished.
+
+### Free-tier habits
+
+- Apply only `environments/dev`.
+- Destroy when idle (Lambdas, API Gateway, DynamoDB on-demand, S3 app bucket all go away).
+- Keep Lambdas **outside a VPC** (no NAT Gateway).
+- Do not add RDS, ALB, ECS, or VPC interface endpoints for this project.
+- State bucket + one SSM parameter can remain.
+
+---
 
 ## Infrastructure design
 
@@ -326,16 +487,31 @@ flowchart TD
 | Business Lambda | DynamoDB Get/Put/Query; S3 Get/Put on `receipts/*`; own logs. JWT secret injected at deploy (no `ssm:GetParameter` on the role). |
 | Authorizer Lambda | `ssm:GetParameter` on the JWT secret; own logs |
 
-Both Lambdas stay outside a VPC (no NAT / interface endpoints).
+Both Lambdas stay outside a VPC.
 
 ### Phase 2 (later)
 
 Cognito replaces custom login. API Gateway JWT authorizer validates Cognito tokens. Register/login routes, `password_hash`, the authorizer Lambda, and the SSM secret go away. Expense handlers already key off `user_id` from authorizer context.
 
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `terraform plan` → no credentials / IMDS timeout | Configure IAM access keys, or clear expired `$env:AWS_*` and export a fresh session |
+| `aws sts` → `ExpiredToken` after `aws login` | `Remove-Item Env:AWS_ACCESS_KEY_ID, Env:AWS_SECRET_ACCESS_KEY, Env:AWS_SESSION_TOKEN` then retry |
+| `terraform plan` → no configuration files | `cd` into `environments/dev` |
+| `curl` → invalid JSON / bad hostname on PowerShell | Use single-quoted JSON or `Invoke-RestMethod` |
+| IAM `MalformedPolicyDocument` | Policy JSON keys must be `Version`, `Statement`, `Effect`, `Action`, `Resource` (capital R) |
+| Lambda zip issues | Binary inside zip must be named `bootstrap`; rebuild with `GOOS=linux GOARCH=amd64` |
+
+---
+
 ## Still to do
 
-1. Export credentials and run `terraform apply` for `dev`
-2. Curl the live API; fix authorizer-context `user_id` if protected routes fail
-3. Implement S3 presigned receipt upload
+1. Prefer IAM user access keys for daily Terraform (stop relying on `aws login` + export)
+2. Implement S3 presigned receipt upload
+3. Optionally read `user_id` only from API Gateway authorizer context in Lambda mode (drop duplicate JWT check in middleware)
 4. GitHub Actions (tests + deploy `dev` via OIDC)
 5. Cognito (phase 2)
