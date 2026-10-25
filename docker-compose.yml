@@ -9,15 +9,18 @@ services:
       USERS_TABLE: users
       EXPENSES_TABLE: expenses
       JWT_SECRET: local-dev-secret
+      # Receipt uploads stay disabled (501) unless you pass LocalStack vars, e.g.:
+      #   docker compose --profile aws -f docker-compose.yml -f docker-compose.receipts.yml up --build
+      # Or set RECEIPTS_BUCKET / S3_ENDPOINT in a receipts override file.
     depends_on:
       - dynamodb
-    
+
   dynamodb:
     image: amazon/dynamodb-local
     ports:
       - "8000:8000"
     command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
-  
+
   localstack:
     image: localstack/localstack
     ports:

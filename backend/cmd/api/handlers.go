@@ -14,6 +14,7 @@ import (
 	"github.com/gazimaksudur2/aws-expense-tracker/internal/auth"
 	"github.com/gazimaksudur2/aws-expense-tracker/internal/expense"
 	"github.com/gazimaksudur2/aws-expense-tracker/internal/id"
+	"github.com/gazimaksudur2/aws-expense-tracker/internal/receipts"
 )
 
 type contextKey string
@@ -27,6 +28,7 @@ type server struct {
 	users    auth.UserStore
 	expenses expense.Store
 	secret   string
+	receipts *receipts.Presigner
 }
 
 func (s *server) routes() http.Handler {
@@ -262,7 +264,65 @@ func (s *server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleReceiptUpload is a stub until Step 7 (S3 presigned PUT).
+// handleReceiptUpload returns a short-lived S3 presigned PUT URL.
+// When RECEIPTS_BUCKET is unset, s.receipts is nil and this returns 501.
 func (s *server) handleReceiptUpload(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "receipt upload arrives in step 7")
+	if s.receipts == nil {
+		writeError(w, http.StatusNotImplemented, "receipt upload is not configured")
+		return
+	}
+	userID, ok := userIDFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var body struct {
+		ExpenseID   string `json:"expense_id"`
+		Filename    string `json:"filename"`
+		ContentType string `json:"content_type"`
+		Date        string `json:"date"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	if body.ExpenseID == "" || body.Filename == "" || body.ContentType == "" {
+		writeError(w, http.StatusBadRequest, "expense_id, filename, and content_type are required")
+		return
+	}
+	if _, err := time.Parse("2006-01-02", body.Date); err != nil {
+		writeError(w, http.StatusBadRequest, "date must be YYYY-MM-DD")
+		return
+	}
+	if !strings.HasPrefix(body.ContentType, "image/") && body.ContentType != "application/pdf" {
+		writeError(w, http.StatusBadRequest, "content_type must start with image/* or application/pdf")
+		return
+	}
+
+	e, err := s.expenses.Get(userID, body.Date, body.ExpenseID)
+	if err != nil {
+		if errors.Is(err, expense.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "expense not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	key := receipts.ObjectKey(userID, body.ExpenseID, body.Filename)
+	url, expiresIn, err := s.receipts.PresignPut(r.Context(), key, body.ContentType)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not create upload URL")
+		return
+	}
+
+	e.ReceiptKey = key
+	if err := s.expenses.Put(e); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"upload_url":  url,
+		"receipt_key": key,
+		"expires_in":  expiresIn,
+	})
 }

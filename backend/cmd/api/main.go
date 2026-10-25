@@ -10,6 +10,7 @@ import (
 	"github.com/akrylysov/algnhsa"
 	"github.com/gazimaksudur2/aws-expense-tracker/internal/auth"
 	"github.com/gazimaksudur2/aws-expense-tracker/internal/expense"
+	"github.com/gazimaksudur2/aws-expense-tracker/internal/receipts"
 	"github.com/gazimaksudur2/aws-expense-tracker/internal/store"
 )
 
@@ -20,10 +21,23 @@ func main() {
 	}
 
 	users, expenses := buildStores()
+	var presigner *receipts.Presigner
+	if bucket := os.Getenv("RECEIPTS_BUCKET"); bucket != "" {
+		p, err := receipts.NewPresigner(context.Background(), bucket, os.Getenv("S3_ENDPOINT"))
+		if err != nil {
+			log.Fatalf("failed to create presigner: %v", err)
+		}
+		presigner = p
+		log.Printf("receipt uploads enabled (bucket=%s endpoint=%q)", bucket, os.Getenv("S3_ENDPOINT"))
+	} else {
+		log.Println("RECEIPTS_BUCKET is not set: POST /receipts/upload returns 501")
+	}
+
 	srv := &server{
 		users:    users,
 		expenses: expenses,
 		secret:   secret,
+		receipts: presigner,
 	}
 
 	switch os.Getenv("APP_MODE") {

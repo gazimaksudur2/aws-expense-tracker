@@ -11,12 +11,13 @@ resource "aws_lambda_function" "api" {
 
   environment {
     variables = {
-      APP_MODE       = "lambda"
-      USERS_TABLE    = var.users_table_name
-      EXPENSES_TABLE = var.expenses_table_name
+      APP_MODE        = "lambda"
+      USERS_TABLE     = var.users_table_name
+      EXPENSES_TABLE  = var.expenses_table_name
+      RECEIPTS_BUCKET = var.receipts_bucket_name
       # Phase 1 login still signs JWTs in the business function.
       # Injected at deploy time; the role policy has no ssm:GetParameter.
-      JWT_SECRET     = data.aws_ssm_parameter.jwt_secret.value
+      JWT_SECRET = data.aws_ssm_parameter.jwt_secret.value
     }
   }
 }

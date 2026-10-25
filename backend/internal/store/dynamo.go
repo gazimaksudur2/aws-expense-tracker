@@ -228,3 +228,34 @@ func (s *DynamoStore) QueryMonth(userID, month string) ([]expense.Expense, error
 	}
 	return out, nil
 }
+
+func (s *DynamoStore) Get(userID, date, expenseID string) (expense.Expense, error) {
+	ctx, cancel := opCtx()
+	defer cancel()
+	out, err := s.db.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(s.expensesTable),
+		Key: map[string]types.AttributeValue{
+			"user_id": &types.AttributeValueMemberS{Value: userID},
+			"sk": &types.AttributeValueMemberS{Value: date + "#" + expenseID},
+		},
+	})
+	if err != nil {
+		return expense.Expense{}, err
+	}
+	if out.Item == nil {
+		return expense.Expense{}, expense.ErrNotFound
+	}
+	var it expenseItem
+	if err := attributevalue.UnmarshalMap(out.Item, &it); err != nil {
+		return expense.Expense{}, err
+	}
+
+	return expense.Expense{
+		ExpenseID: it.ExpenseID,
+		UserID: it.UserID,
+		Amount: it.Amount,
+		Category: it.Category,
+		Date: it.Date,
+		ReceiptKey: it.ReceiptKey,
+	}, nil
+}

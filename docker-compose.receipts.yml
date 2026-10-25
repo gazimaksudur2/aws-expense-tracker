@@ -1,0 +1,18 @@
+# Optional override for local receipt uploads with LocalStack.
+# Usage:
+#   docker compose --profile aws -f docker-compose.yml -f docker-compose.receipts.yml up --build
+# Then create the bucket once:
+#   aws --endpoint-url=http://localhost:4566 s3 mb s3://expense-tracker-receipts-local
+#   (with AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test)
+
+services:
+  api:
+    environment:
+      RECEIPTS_BUCKET: expense-tracker-receipts-local
+      S3_ENDPOINT: http://localstack:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    depends_on:
+      - dynamodb
+      - localstack

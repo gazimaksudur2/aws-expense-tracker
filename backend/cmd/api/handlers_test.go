@@ -311,11 +311,15 @@ func TestAnalytics_UserIsolation(t *testing.T) {
 	}
 }
 
-func TestReceiptUpload_NotImplementedYet(t *testing.T) {
-	h := newTestHandler()
+func TestReceiptUpload_NotConfigured(t *testing.T) {
+	h := newTestHandler() // receipts stays nil
 	tok := registerAndLogin(t, h, "a@test.com")
 
-	if code, _ := do(t, h, "POST", "/receipts/upload", tok, `{}`); code != http.StatusNotImplemented {
-		t.Errorf("expected 501 until step 7, got %d", code)
+	code, out := do(t, h, "POST", "/receipts/upload", tok, `{}`)
+	if code != http.StatusNotImplemented {
+		t.Errorf("expected 501, got %d", code)
+	}
+	if out["error"] != "receipt upload is not configured" {
+		t.Errorf("error message: got %v", out["error"])
 	}
 }
