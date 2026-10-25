@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Go tests
+    runs-on: ubuntu-latest
+
+    services:
+      dynamodb:
+        image: amazon/dynamodb-local:latest
+        ports:
+          - 8000:8000
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Unit and handler tests
+        run: go test ./...
+
+      - name: Wait for DynamoDB Local
+        run: |
+          for i in $(seq 1 30); do
+            if curl -s -o /dev/null http://localhost:8000/; then
+              echo "DynamoDB Local is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "DynamoDB Local did not start" >&2
+          exit 1
+
+      - name: Integration tests (DynamoDB Local)
+        env:
+          DYNAMODB_ENDPOINT: http://localhost:8000
+          AWS_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: local
+          AWS_SECRET_ACCESS_KEY: local
+        run: go test -tags=integration ./internal/store -v

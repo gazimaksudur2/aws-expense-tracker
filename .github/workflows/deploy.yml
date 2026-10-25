@@ -1,0 +1,72 @@
+name: Deploy dev
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # required for OIDC → AWS
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Terraform apply (dev)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Build Lambda zips
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/lambda"
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$RUNNER_TEMP/lambda/bootstrap" ./cmd/api
+          (cd "$RUNNER_TEMP/lambda" && zip -q api.zip bootstrap)
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$RUNNER_TEMP/lambda/bootstrap" ./cmd/authorizer
+          (cd "$RUNNER_TEMP/lambda" && zip -q authorizer.zip bootstrap)
+          ls -la "$RUNNER_TEMP/lambda"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Terraform init
+        working-directory: infrastructure/terraform/environments/dev
+        run: terraform init -input=false
+
+      - name: Terraform apply
+        working-directory: infrastructure/terraform/environments/dev
+        env:
+          TF_VAR_api_zip_path: ${{ runner.temp }}/lambda/api.zip
+          TF_VAR_authorizer_zip_path: ${{ runner.temp }}/lambda/authorizer.zip
+        run: |
+          terraform apply -input=false -auto-approve
+          echo "API_ENDPOINT=$(terraform output -raw api_endpoint)" >> "$GITHUB_ENV"
+
+      - name: Summary
+        run: |
+          echo "### Deployed dev" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- API: \`${API_ENDPOINT}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Remember to \`terraform destroy\` when not demoing (free tier)." >> "$GITHUB_STEP_SUMMARY"

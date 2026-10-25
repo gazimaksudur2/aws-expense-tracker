@@ -4,7 +4,7 @@ A Go expense API. Locally it runs in Docker against DynamoDB Local. In AWS it ru
 
 You register, log an expense, and read a month as rows and category totals. Every expense belongs to the signed-in user.
 
-**Local path is complete.** The `dev` stack has been applied, smoke-tested on AWS (register → login → create expense → monthly → analytics), and **destroyed** so the account stays near free tier when idle. Re-apply anytime to demo.
+**Local and AWS phase 1 (including S3 receipt upload) are complete.** Re-apply `dev` to demo, then `terraform destroy` when idle. CI runs tests on every PR; deploy to `dev` uses GitHub Actions OIDC (no long-lived AWS keys in GitHub).
 
 ## Status
 
@@ -15,12 +15,10 @@ You register, log an expense, and read a month as rows and category totals. Ever
 | 3 | DynamoDB store, startup table creation, integration tests | Done |
 | 4 | Business Lambda entrypoint (`APP_MODE=lambda` via `algnhsa`) | Done |
 | 5 | Authorizer Lambda (`cmd/authorizer`) | Done |
-| 6–9 | Terraform modules + `environments/dev`; apply, smoke-test, destroy | Done |
-| 10–11 | Staging/prod apply, GitHub Actions + OIDC | Planned |
+| 6–9 | Terraform `dev` + S3 receipts (presigned PUT) | Done |
+| 10–11 | GitHub Actions CI + OIDC deploy workflows | Done (enable OIDC role once — see below) |
 | 12 | Cognito JWT authorizer (phase 2) | Planned |
-| 13 | Architecture diagram asset | Planned |
-
-`POST /receipts/upload` still returns `501` until the S3 presigned PUT handler is wired.
+| 13 | Staging/prod applies + architecture diagram | Planned |
 
 ### What stays in AWS after `terraform destroy`
 
@@ -77,10 +75,10 @@ docker compose up --build
 
 On startup the API creates the `users` and `expenses` tables when `DYNAMODB_ENDPOINT` is set.
 
-Optional LocalStack (S3 only, for later receipt work):
+Optional LocalStack for local receipt uploads (see **Local receipt uploads** below):
 
 ```powershell
-docker compose --profile aws up --build
+docker compose --profile aws -f docker-compose.yml -f docker-compose.receipts.yml up --build
 ```
 
 ### 4. Smoke-test the local API (PowerShell)
@@ -140,7 +138,7 @@ Register and login are public. Every other route needs `Authorization: Bearer <t
 | `POST /expenses` | token | Record an expense |
 | `GET /expenses/monthly?month=YYYY-MM` | token | Month rows, ordered by date |
 | `GET /analytics?month=YYYY-MM` | token | Total + per-category sums |
-| `POST /receipts/upload` | token | Stub (`501`) |
+| `POST /receipts/upload` | token | Presigned S3 PUT URL (`501` if `RECEIPTS_BUCKET` unset) |
 
 ### Behaviour notes
 
@@ -203,6 +201,19 @@ infrastructure/terraform/
 | `USERS_TABLE` | `users` |
 | `EXPENSES_TABLE` | `expenses` |
 | `DYNAMODB_ENDPOINT` | `http://dynamodb:8000` |
+| `RECEIPTS_BUCKET` | unset by default → receipts return `501` |
+
+### Local receipt uploads (optional LocalStack)
+
+```powershell
+docker compose --profile aws -f docker-compose.yml -f docker-compose.receipts.yml up --build
+
+$env:AWS_ACCESS_KEY_ID = "test"
+$env:AWS_SECRET_ACCESS_KEY = "test"
+aws --endpoint-url=http://localhost:4566 s3 mb s3://expense-tracker-receipts-local
+```
+
+Then call `POST /receipts/upload` with `expense_id`, `filename`, `content_type`, and `date`, and `PUT` the file to `upload_url` within **5 minutes**.
 
 ---
 
@@ -419,7 +430,34 @@ Invoke-RestMethod -Method GET -Uri "$API/analytics?month=2026-10" `
   -Headers @{ Authorization = "Bearer $TOKEN" } | ConvertTo-Json -Depth 5
 ```
 
-Verified previously against a live `dev` stack: register, login, create expense, monthly, and analytics all succeeded.
+Verified previously against a live `dev` stack: register, login, create expense, monthly, analytics, and receipt upload all succeeded.
+
+### Smoke-test receipt upload (after apply)
+
+Rebuild Lambda zips before apply whenever Go changes — otherwise AWS keeps the old binary.
+
+```powershell
+$API = terraform output -raw api_endpoint
+# ... register, login → $TOKEN, create expense → $exp ...
+
+$upload = Invoke-RestMethod -Method POST -Uri "$API/receipts/upload" `
+  -Headers @{ Authorization = "Bearer $TOKEN" } `
+  -ContentType "application/json" `
+  -Body (@{
+    expense_id   = $exp.expense_id
+    filename     = "receipt.jpg"
+    content_type = "image/jpeg"
+    date         = "2026-10-10"
+  } | ConvertTo-Json)
+
+# Upload immediately (URL expires in 300 seconds)
+Set-Content -Path "$env:TEMP\receipt.jpg" -Value "fake-image-bytes" -NoNewline
+Invoke-WebRequest -Method PUT -Uri $upload.upload_url `
+  -ContentType "image/jpeg" `
+  -InFile "$env:TEMP\receipt.jpg"
+
+aws s3 ls ("s3://{0}/receipts/" -f (terraform output -raw receipts_bucket_name)) --recursive
+```
 
 ### Destroy (stay near free tier when not demoing)
 
@@ -438,9 +476,35 @@ aws apigatewayv2 get-apis --query "Items[?contains(Name, 'expense-tracker')].Nam
 
 Expect: `The state file is empty`, and `[]` / `[]` for Lambda and API Gateway queries.
 
-**Last verified destroy:** 29 resources removed successfully.
+#### If destroy fails with `BucketNotEmpty`
 
-Re-demo later: rebuild zips → `terraform apply` → smoke-test → `terraform destroy` when finished.
+The receipts bucket has **versioning** on. Uploaded files (and delete markers) block `DeleteBucket`. `aws s3 rm --recursive` is **not** enough — delete every object **version** first, then re-run destroy:
+
+```powershell
+$bucket = "expense-tracker-receipts-dev-611728563978"
+# Or: $bucket = terraform output -raw receipts_bucket_name   # if destroy hasn't removed the output yet
+
+$json = aws s3api list-object-versions --bucket $bucket --output json | ConvertFrom-Json
+$objects = @()
+if ($json.Versions) {
+  $objects += $json.Versions | ForEach-Object { @{ Key = $_.Key; VersionId = $_.VersionId } }
+}
+if ($json.DeleteMarkers) {
+  $objects += $json.DeleteMarkers | ForEach-Object { @{ Key = $_.Key; VersionId = $_.VersionId } }
+}
+
+if ($objects.Count -gt 0) {
+  $tmp = "$env:TEMP\s3-delete.json"
+  @{ Objects = @($objects); Quiet = $true } | ConvertTo-Json -Depth 5 |
+    Set-Content -Path $tmp -Encoding utf8
+  aws s3api delete-objects --bucket $bucket --delete "file://$tmp"
+}
+
+cd D:\DevProjects\PersonalProjects\aws-expense-tracker\infrastructure\terraform\environments\dev
+terraform destroy
+```
+
+Re-demo later: rebuild zips → `terraform apply` → smoke-test → empty bucket if needed → `terraform destroy` when finished.
 
 ### Free-tier habits
 
@@ -459,7 +523,8 @@ Re-demo later: rebuild zips → `terraform apply` → smoke-test → `terraform 
 | `database` | `users-{env}`, `expenses-{env}` (on-demand) |
 | `storage` | Private receipts bucket, SSE-S3, versioning, 30-day noncurrent expiry |
 | `monitoring` | 14-day log groups, one dashboard, one error alarm |
-| `api` | Two IAM roles, two Lambdas, HTTP API, REQUEST authorizer, routes |
+| `api` | Two IAM roles, two Lambdas, HTTP API, REQUEST authorizer, routes; `RECEIPTS_BUCKET` on the business Lambda |
+| `github-oidc` | GitHub Actions OIDC provider + deploy role (apply once via `environments/oidc`) |
 
 ```mermaid
 flowchart TD
@@ -495,6 +560,75 @@ Cognito replaces custom login. API Gateway JWT authorizer validates Cognito toke
 
 ---
 
+## CI/CD (GitHub Actions + OIDC)
+
+Workflows live under `.github/workflows/`:
+
+| Workflow | When | What |
+|---|---|---|
+| `ci.yml` | PR + push to `main` | `go test ./...` and integration tests against DynamoDB Local |
+| `deploy.yml` | Push to `main` (and manual `workflow_dispatch`) | Build Linux Lambda zips → `terraform apply` in `environments/dev` via OIDC |
+
+No AWS access keys are stored in GitHub. Actions assume an IAM role with a short-lived token.
+
+### One-time: create the OIDC role
+
+With local AWS credentials that can manage IAM:
+
+```powershell
+cd D:\DevProjects\PersonalProjects\aws-expense-tracker\infrastructure\terraform\environments\oidc
+terraform init
+terraform apply
+terraform output -raw aws_role_arn
+```
+
+Copy the role ARN.
+
+If apply fails because the GitHub OIDC provider already exists in the account, import it then re-apply:
+
+```powershell
+aws iam list-open-id-connect-providers
+terraform import module.github_oidc.aws_iam_openid_connect_provider.github `
+  arn:aws:iam::611728563978:oidc-provider/token.actions.githubusercontent.com
+terraform apply
+```
+
+### One-time: GitHub repository secret
+
+In the GitHub repo → **Settings** → **Secrets and variables** → **Actions**:
+
+| Name | Value |
+|---|---|
+| `AWS_ROLE_ARN` | output of `terraform output -raw aws_role_arn` |
+
+The trust policy allows only `repo:gazimaksudur2/aws-expense-tracker:*`.
+
+### What happens on push to `main`
+
+1. CI runs unit + integration tests.
+2. Deploy builds `bootstrap` zips for `cmd/api` and `cmd/authorizer`.
+3. `aws-actions/configure-aws-credentials` assumes `AWS_ROLE_ARN` via OIDC.
+4. `terraform apply` updates `dev` (uses the S3 state bucket and SSM JWT secret you already created).
+
+**Cost:** a push to `main` leaves the stack running. Destroy when idle:
+
+```powershell
+cd infrastructure\terraform\environments\dev
+terraform destroy
+```
+
+Or add a manual destroy workflow later.
+
+### Local develop vs CI
+
+| Task | Local | CI |
+|---|---|---|
+| Unit tests | `go test ./...` | `ci.yml` |
+| Integration tests | DynamoDB Local via Compose | service container on `:8000` |
+| Deploy | rebuild zips + `terraform apply` | `deploy.yml` on `main` |
+
+---
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -505,13 +639,16 @@ Cognito replaces custom login. API Gateway JWT authorizer validates Cognito toke
 | `curl` → invalid JSON / bad hostname on PowerShell | Use single-quoted JSON or `Invoke-RestMethod` |
 | IAM `MalformedPolicyDocument` | Policy JSON keys must be `Version`, `Statement`, `Effect`, `Action`, `Resource` (capital R) |
 | Lambda zip issues | Binary inside zip must be named `bootstrap`; rebuild with `GOOS=linux GOARCH=amd64` |
+| Live API still says `receipt upload arrives in step 7` | Old zip deployed — rebuild zips and `terraform apply` again |
+| S3 `Request has expired` on PUT | Presigned URL is 5 minutes — request a new URL and upload immediately |
+| `terraform destroy` → S3 `BucketNotEmpty` | Receipts bucket is versioned — delete all versions/delete markers (see Destroy section), then destroy again |
+| Deploy workflow `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Apply `environments/oidc`, set `AWS_ROLE_ARN` secret, ensure repo name matches the trust policy |
 
 ---
 
 ## Still to do
 
-1. Prefer IAM user access keys for daily Terraform (stop relying on `aws login` + export)
-2. Implement S3 presigned receipt upload
-3. Optionally read `user_id` only from API Gateway authorizer context in Lambda mode (drop duplicate JWT check in middleware)
-4. GitHub Actions (tests + deploy `dev` via OIDC)
-5. Cognito (phase 2)
+1. Set GitHub Actions secret `AWS_ROLE_ARN` to `arn:aws:iam::611728563978:role/expense-tracker-github-actions` (OIDC role already applied)
+2. Optionally read `user_id` only from API Gateway authorizer context in Lambda mode
+3. Cognito (phase 2)
+4. Staging/prod root modules (apply only when needed)
