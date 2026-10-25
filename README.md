@@ -681,6 +681,7 @@ Or add a manual destroy workflow later.
 | Deploy workflow `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Secret alone is not enough — IAM trust `sub` must match the token. New GitHub repos use immutable form `repo:ORG@OWNER_ID/REPO@REPO_ID:ref:...` (see CloudTrail). Update `environments/oidc` IDs and `terraform apply`, then re-run the workflow. Also check secret has no quotes/whitespace. |
 | AWS API returns `401` with a Cognito access token | Use the **IdToken** from `initiate-auth`, not `AccessToken` |
 | Cognito `UserNotConfirmedException` | `admin-confirm-sign-up` (dev) or complete email verification |
+| `DeleteAuthorizer` → `ConflictException` (still referenced in route) | Terraform renamed the authorizer while routes still pointed at the old id. Retarget routes to the new JWT authorizer (or `NONE`), delete the old authorizer, `terraform state rm` the stale resource, then `terraform apply` again. |
 
 ---
 
