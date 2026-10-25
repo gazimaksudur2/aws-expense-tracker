@@ -12,3 +12,4 @@ debug-*.log
 *.html
 *.css\
 .cursorignore
+infrastructure/terraform/environments/dev/.lambda/

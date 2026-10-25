@@ -47,8 +47,20 @@ These were created once by hand and are **not** in the Terraform stack. Keep the
 ### 1. Clone and enter the repo
 
 ```powershell
-cd D:\DevProjects\PersonalProjects\aws-expense-tracker
+git clone https://github.com/gazimaksudur2/aws-expense-tracker.git
+cd aws-expense-tracker
 ```
+
+HTTPS clone URL: [https://github.com/gazimaksudur2/aws-expense-tracker](https://github.com/gazimaksudur2/aws-expense-tracker)
+
+With SSH (if you use GitHub SSH keys):
+
+```powershell
+git clone git@github.com:gazimaksudur2/aws-expense-tracker.git
+cd aws-expense-tracker
+```
+
+All later commands assume you are in the **repo root** (`aws-expense-tracker/`) unless a `cd` says otherwise. Paths below are **relative** to that root.
 
 ### 2. Install Go dependencies and run tests
 
@@ -57,6 +69,7 @@ cd backend
 go mod tidy
 go test ./...
 go test -race ./...
+cd ..
 ```
 
 ### 3. Run locally with Docker
@@ -64,7 +77,6 @@ go test -race ./...
 From the **repo root** (not `backend/`):
 
 ```powershell
-cd D:\DevProjects\PersonalProjects\aws-expense-tracker
 docker compose up --build
 ```
 
@@ -123,6 +135,7 @@ Data survives `docker compose restart api`. `docker compose down` wipes DynamoDB
 docker compose up -d dynamodb
 cd backend
 go test -tags=integration ./internal/store -v
+cd ..
 ```
 
 ---
@@ -371,24 +384,28 @@ region = "us-east-1"
 Runtime `provided.al2023` requires the binary inside the zip to be named `bootstrap`:
 
 ```powershell
-cd D:\DevProjects\PersonalProjects\aws-expense-tracker\backend
+cd backend
 $env:GOOS = "linux"; $env:GOARCH = "amd64"
+New-Item -ItemType Directory -Force -Path ..\infrastructure\terraform\environments\dev\.lambda | Out-Null
 
-go build -o $env:TEMP\bootstrap .\cmd\api
-Compress-Archive -Force -Path $env:TEMP\bootstrap -DestinationPath $env:TEMP\api.zip
+go build -o .\bootstrap .\cmd\api
+Compress-Archive -Force -Path .\bootstrap -DestinationPath ..\infrastructure\terraform\environments\dev\.lambda\api.zip
 
-go build -o $env:TEMP\bootstrap .\cmd\authorizer
-Compress-Archive -Force -Path $env:TEMP\bootstrap -DestinationPath $env:TEMP\authorizer.zip
+go build -o .\bootstrap .\cmd\authorizer
+Compress-Archive -Force -Path .\bootstrap -DestinationPath ..\infrastructure\terraform\environments\dev\.lambda\authorizer.zip
 
+Remove-Item .\bootstrap -ErrorAction SilentlyContinue
 Remove-Item Env:GOOS; Remove-Item Env:GOARCH
-Test-Path $env:TEMP\api.zip, $env:TEMP\authorizer.zip
+cd ..
+Test-Path .\infrastructure\terraform\environments\dev\.lambda\api.zip,
+          .\infrastructure\terraform\environments\dev\.lambda\authorizer.zip
 ```
 
-Create gitignored `infrastructure/terraform/environments/dev/terraform.tfvars`:
+Create gitignored `infrastructure/terraform/environments/dev/terraform.tfvars` (paths relative to that directory):
 
 ```hcl
-api_zip_path        = "C:/Users/<you>/AppData/Local/Temp/api.zip"
-authorizer_zip_path = "C:/Users/<you>/AppData/Local/Temp/authorizer.zip"
+api_zip_path        = "./.lambda/api.zip"
+authorizer_zip_path = "./.lambda/authorizer.zip"
 ```
 
 ### Apply
@@ -397,11 +414,12 @@ authorizer_zip_path = "C:/Users/<you>/AppData/Local/Temp/authorizer.zip"
 # Creds: IAM user via `aws configure` (preferred), or aws login + export as above
 aws sts get-caller-identity
 
-cd D:\DevProjects\PersonalProjects\aws-expense-tracker\infrastructure\terraform\environments\dev
+cd infrastructure\terraform\environments\dev
 terraform init
 terraform plan
 terraform apply
 terraform output api_endpoint
+cd ..\..\..\..
 ```
 
 ### Smoke-test the live API
@@ -464,7 +482,7 @@ aws s3 ls ("s3://{0}/receipts/" -f (terraform output -raw receipts_bucket_name))
 ```powershell
 aws sts get-caller-identity   # fix creds first if this fails
 
-cd D:\DevProjects\PersonalProjects\aws-expense-tracker\infrastructure\terraform\environments\dev
+cd infrastructure\terraform\environments\dev
 terraform destroy
 # type yes
 
@@ -472,6 +490,7 @@ terraform destroy
 terraform show
 aws lambda list-functions --query "Functions[?contains(FunctionName, 'expense-tracker')].FunctionName"
 aws apigatewayv2 get-apis --query "Items[?contains(Name, 'expense-tracker')].Name"
+cd ..\..\..\..
 ```
 
 Expect: `The state file is empty`, and `[]` / `[]` for Lambda and API Gateway queries.
@@ -500,8 +519,9 @@ if ($objects.Count -gt 0) {
   aws s3api delete-objects --bucket $bucket --delete "file://$tmp"
 }
 
-cd D:\DevProjects\PersonalProjects\aws-expense-tracker\infrastructure\terraform\environments\dev
+cd infrastructure\terraform\environments\dev
 terraform destroy
+cd ..\..\..\..
 ```
 
 Re-demo later: rebuild zips → `terraform apply` → smoke-test → empty bucket if needed → `terraform destroy` when finished.
@@ -576,10 +596,11 @@ No AWS access keys are stored in GitHub. Actions assume an IAM role with a short
 With local AWS credentials that can manage IAM:
 
 ```powershell
-cd D:\DevProjects\PersonalProjects\aws-expense-tracker\infrastructure\terraform\environments\oidc
+cd infrastructure\terraform\environments\oidc
 terraform init
 terraform apply
 terraform output -raw aws_role_arn
+cd ..\..\..\..
 ```
 
 Copy the role ARN.
@@ -615,6 +636,7 @@ The trust policy allows only `repo:gazimaksudur2/aws-expense-tracker:*`.
 ```powershell
 cd infrastructure\terraform\environments\dev
 terraform destroy
+cd ..\..\..\..
 ```
 
 Or add a manual destroy workflow later.
