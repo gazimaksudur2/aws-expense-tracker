@@ -14,12 +14,12 @@ You register, log an expense, and read a month as rows and category totals. Ever
 | 2 | Docker Compose + DynamoDB Local | Done |
 | 3 | DynamoDB store, startup table creation, integration tests | Done |
 | 4 | Business Lambda entrypoint (`APP_MODE=lambda` via `algnhsa`) | Done |
-| 5 | Authorizer Lambda (`cmd/authorizer`) | Done (phase 1; unused after Cognito) |
+| 5 | Authorizer Lambda (`cmd/authorizer`) | Done (phase 1; removed after Cognito) |
 | 6–9 | Terraform `dev` + S3 receipts (presigned PUT) | Done |
 | 10–11 | GitHub Actions CI + OIDC deploy workflows | Done |
 | 12 | Cognito JWT authorizer (phase 2) | Done |
-| 13 | Staging root module (apply only when needed) | Done |
-| 14 | Prod root module + architecture diagram asset | Planned |
+| 13 | Staging + prod root modules (apply only when needed) | Done |
+| 14 | Architecture diagram | Done — see [`docs/architecture.md`](docs/architecture.md) |
 
 ### What stays in AWS after `terraform destroy`
 
@@ -29,7 +29,7 @@ These were created once by hand and are **not** in the Terraform stack. Keep the
 |---|---|
 | Terraform state bucket | `expense-tracker-tfstate-<account-id>` |
 
-The old SSM JWT secret (`/expense-tracker/dev/jwt-secret`) is **no longer used** by the AWS stack after phase 2. You may delete it. Local Docker still uses `JWT_SECRET` from Compose.
+Local Docker still uses `JWT_SECRET` from Compose. The old SSM `/expense-tracker/dev/jwt-secret` parameter is no longer part of the project.
 
 ---
 
@@ -173,7 +173,6 @@ On AWS, sign up / sign in with **Cognito** (see smoke-test below). Send the **ID
 
 - `cmd/api` — HTTP on `:8080` when `APP_MODE=http`; Lambda when `APP_MODE=lambda` (`algnhsa`).
 - Local middleware verifies HS256 JWTs. In Lambda mode the handler reads Cognito `sub` from API Gateway JWT authorizer context (no re-validation with a shared secret).
-- `cmd/authorizer` — phase 1 only; not deployed after Cognito.
 
 ### Swappable storage
 
@@ -191,20 +190,25 @@ On AWS, sign up / sign in with **Cognito** (see smoke-test below). Send the **ID
 ```text
 backend/
   cmd/api/                 HTTP + Lambda business entrypoint
-  cmd/authorizer/          Phase 1 only (not deployed after Cognito)
-  internal/auth|expense|analytics|store|id/
+  internal/auth|expense|analytics|store|id|receipts/
   Dockerfile
 docker-compose.yml
+docs/
+  architecture.md          Mermaid + notes
+  architecture.svg         Static overview diagram
 infrastructure/terraform/
   modules/
     database/              DynamoDB tables
     storage/               S3 receipts bucket
+    cognito/               User pool + app client
     monitoring/            Log groups, dashboard, alarm
-    api/                   IAM, Lambdas, HTTP API, authorizer, routes
+    api/                   IAM, Lambda, HTTP API, JWT authorizer
+    github-oidc/           GitHub Actions deploy role
   environments/
-    dev/                   Root module (apply this)
-    staging/               Placeholder
-    prod/                  Placeholder
+    dev/                   Day-to-day demo stack
+    staging/               Optional second stack
+    prod/                  Optional long-lived stack
+    oidc/                  One-time OIDC provider + role
 ```
 
 ### Local env vars (Compose sets these)
@@ -582,9 +586,11 @@ flowchart TD
 
 Lambda stays outside a VPC.
 
-### Staging
+### Staging and prod
 
-`infrastructure/terraform/environments/staging` mirrors `dev` (separate state key and resource names). **Do not apply** unless you intentionally want a second stack; destroy when idle.
+`infrastructure/terraform/environments/staging` and `environments/prod` mirror `dev` (separate state keys and resource names). **Do not apply** unless you intentionally want another stack; destroy when idle. Day-to-day demos use `dev` only.
+
+Architecture overview: [`docs/architecture.md`](docs/architecture.md) / [`docs/architecture.svg`](docs/architecture.svg).
 
 ---
 
@@ -680,7 +686,5 @@ Or add a manual destroy workflow later.
 
 ## Still to do
 
-1. Optional: delete unused SSM `/expense-tracker/dev/jwt-secret` and remove `cmd/authorizer` from the tree
-2. Optional: DynamoDB users table PK → Cognito `sub` + profile endpoints (expenses already use `sub`)
-3. Prod root module (apply only when needed)
-4. Architecture diagram asset (Mermaid in README is the living diagram)
+1. Optional: DynamoDB users table PK → Cognito `sub` + profile endpoints (expenses already use `sub`; AWS Lambda no longer needs the users table)
+2. Optional: tighten Cognito (hosted UI / custom domain) and OIDC deploy role beyond `AdministratorAccess`

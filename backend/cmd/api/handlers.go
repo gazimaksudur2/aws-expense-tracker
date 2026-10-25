@@ -113,24 +113,14 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// userIDFromAuthorizer reads Cognito JWT `sub` (phase 2) or legacy Lambda authorizer user_id.
+// userIDFromAuthorizer reads Cognito JWT `sub` from API Gateway JWT authorizer context.
 func userIDFromAuthorizer(ctx context.Context) (string, bool) {
 	event, ok := algnhsa.APIGatewayV2RequestFromContext(ctx)
-	if !ok || event.RequestContext.Authorizer == nil {
+	if !ok || event.RequestContext.Authorizer == nil || event.RequestContext.Authorizer.JWT == nil {
 		return "", false
 	}
-	authz := event.RequestContext.Authorizer
-	if authz.JWT != nil {
-		if sub := authz.JWT.Claims["sub"]; sub != "" {
-			return sub, true
-		}
-	}
-	if authz.Lambda != nil {
-		if v, ok := authz.Lambda["user_id"].(string); ok && v != "" {
-			return v, true
-		}
-	}
-	return "", false
+	sub := event.RequestContext.Authorizer.JWT.Claims["sub"]
+	return sub, sub != ""
 }
 
 // ---- public handlers ----

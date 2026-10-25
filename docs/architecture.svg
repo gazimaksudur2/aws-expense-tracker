@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="420" viewBox="0 0 960 420" role="img" aria-labelledby="title desc">
+  <title id="title">Expense tracker AWS architecture</title>
+  <desc id="desc">Client authenticates with Cognito, calls API Gateway with an ID token, JWT authorizer passes sub to the business Lambda, which uses DynamoDB and S3.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+    <style>
+      .box { fill: #f8fafc; stroke: #334155; stroke-width: 2; rx: 8; }
+      .box-accent { fill: #ecfdf5; stroke: #047857; stroke-width: 2; rx: 8; }
+      .box-data { fill: #eff6ff; stroke: #1d4ed8; stroke-width: 2; rx: 8; }
+      .label { font-family: Segoe UI, Helvetica, Arial, sans-serif; font-size: 14px; fill: #0f172a; text-anchor: middle; }
+      .sub { font-family: Segoe UI, Helvetica, Arial, sans-serif; font-size: 11px; fill: #475569; text-anchor: middle; }
+      .edge { stroke: #334155; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .title { font-family: Segoe UI, Helvetica, Arial, sans-serif; font-size: 18px; font-weight: 600; fill: #0f172a; }
+    </style>
+  </defs>
+
+  <text x="24" y="32" class="title">Expense tracker  AWS (Cognito phase 2)</text>
+
+  <rect class="box" x="40" y="80" width="120" height="64"/>
+  <text class="label" x="100" y="108">Client</text>
+  <text class="sub" x="100" y="128">CLI / app</text>
+
+  <rect class="box-accent" x="220" y="40" width="150" height="64"/>
+  <text class="label" x="295" y="68">Cognito</text>
+  <text class="sub" x="295" y="88">user pool + client</text>
+
+  <rect class="box" x="220" y="150" width="150" height="64"/>
+  <text class="label" x="295" y="178">API Gateway</text>
+  <text class="sub" x="295" y="198">HTTP API + JWT</text>
+
+  <rect class="box" x="440" y="150" width="150" height="64"/>
+  <text class="label" x="515" y="178">Lambda</text>
+  <text class="sub" x="515" y="198">cmd/api · APP_MODE=lambda</text>
+
+  <rect class="box-data" x="660" y="80" width="140" height="64"/>
+  <text class="label" x="730" y="108">DynamoDB</text>
+  <text class="sub" x="730" y="128">expenses-{env}</text>
+
+  <rect class="box-data" x="660" y="180" width="140" height="64"/>
+  <text class="label" x="730" y="208">S3</text>
+  <text class="sub" x="730" y="228">receipts/*</text>
+
+  <rect class="box" x="660" y="290" width="140" height="64"/>
+  <text class="label" x="730" y="318">CloudWatch</text>
+  <text class="sub" x="730" y="338">logs · alarm</text>
+
+  <path class="edge" d="M160 100 H220"/>
+  <path class="edge" d="M100 80 V72 H220"/>
+  <text class="sub" x="175" y="60">sign-up / sign-in</text>
+
+  <path class="edge" d="M295 104 V150"/>
+  <text class="sub" x="360" y="130">ID token</text>
+
+  <path class="edge" d="M160 182 H220"/>
+  <text class="sub" x="175" y="172">Bearer</text>
+
+  <path class="edge" d="M370 182 H440"/>
+  <text class="sub" x="405" y="172">sub</text>
+
+  <path class="edge" d="M590 170 H660"/>
+  <path class="edge" d="M590 195 H660"/>
+  <path class="edge" d="M515 214 V322 H660"/>
+
+  <text class="sub" x="100" y="380">Local Docker keeps HS256 register/login; AWS has no /users routes.</text>
+</svg>

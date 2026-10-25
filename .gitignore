@@ -10,6 +10,6 @@ debug-*.log
 *.json
 *.xml
 *.html
-*.css\
+*.css
 .cursorignore
 infrastructure/terraform/environments/dev/.lambda/
